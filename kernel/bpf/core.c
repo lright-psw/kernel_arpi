@@ -89,6 +89,15 @@ void *bpf_internal_load_pointer_neg_helper(const struct sk_buff *skb, int k, uns
 	return NULL;
 }
 
+/*
+ * Android uses __PAGE_SIZE for larger than 4KB base page size emulation
+ * on x86_64. Undef this to avoid conflicts with bpf core's usage of
+ * __PAGE_SIZE in this compilation unit.
+ */
+#ifdef __PAGE_SIZE
+#undef __PAGE_SIZE
+#endif
+
 /* tell bpf programs that include vmlinux.h kernel's PAGE_SIZE */
 enum page_size_enum {
 	__PAGE_SIZE = PAGE_SIZE
@@ -2309,49 +2318,28 @@ static bool __bpf_prog_map_compatible(struct bpf_map *map,
 				      const struct bpf_prog *fp)
 {
 	enum bpf_prog_type prog_type = resolve_prog_type(fp);
+	bool ret;
 	struct bpf_prog_aux *aux = fp->aux;
-	enum bpf_cgroup_storage_type i;
-	bool ret = false;
-	u64 cookie;
 
 	if (fp->kprobe_override)
-		return ret;
+		return false;
 
-	spin_lock(&map->owner_lock);
-	/* There's no owner yet where we could check for compatibility. */
-	if (!map->owner) {
-		map->owner = bpf_map_owner_alloc(map);
-		if (!map->owner)
-			goto err;
-		map->owner->type  = prog_type;
-		map->owner->jited = fp->jited;
-		map->owner->xdp_has_frags = aux->xdp_has_frags;
-		map->owner->expected_attach_type = fp->expected_attach_type;
-		map->owner->attach_func_proto = aux->attach_func_proto;
-		for_each_cgroup_storage_type(i) {
-			map->owner->storage_cookie[i] =
-				aux->cgroup_storage[i] ?
-				aux->cgroup_storage[i]->cookie : 0;
-		}
+	spin_lock(&map->owner.lock);
+	if (!map->owner.type) {
+		/* There's no owner yet where we could check for
+		 * compatibility.
+		 */
+		map->owner.type  = prog_type;
+		map->owner.jited = fp->jited;
+		map->owner.xdp_has_frags = aux->xdp_has_frags;
+		map->owner.attach_func_proto = aux->attach_func_proto;
 		ret = true;
 	} else {
-		ret = map->owner->type  == prog_type &&
-		      map->owner->jited == fp->jited &&
-		      map->owner->xdp_has_frags == aux->xdp_has_frags;
+		ret = map->owner.type  == prog_type &&
+		      map->owner.jited == fp->jited &&
+		      map->owner.xdp_has_frags == aux->xdp_has_frags;
 		if (ret &&
-		    map->map_type == BPF_MAP_TYPE_PROG_ARRAY &&
-		    map->owner->expected_attach_type != fp->expected_attach_type)
-			ret = false;
-		for_each_cgroup_storage_type(i) {
-			if (!ret)
-				break;
-			cookie = aux->cgroup_storage[i] ?
-				 aux->cgroup_storage[i]->cookie : 0;
-			ret = map->owner->storage_cookie[i] == cookie ||
-			      !cookie;
-		}
-		if (ret &&
-		    map->owner->attach_func_proto != aux->attach_func_proto) {
+		    map->owner.attach_func_proto != aux->attach_func_proto) {
 			switch (prog_type) {
 			case BPF_PROG_TYPE_TRACING:
 			case BPF_PROG_TYPE_LSM:
@@ -2364,8 +2352,8 @@ static bool __bpf_prog_map_compatible(struct bpf_map *map,
 			}
 		}
 	}
-err:
-	spin_unlock(&map->owner_lock);
+	spin_unlock(&map->owner.lock);
+
 	return ret;
 }
 
@@ -3090,11 +3078,6 @@ int __weak bpf_arch_text_invalidate(void *dst, size_t len)
 }
 
 bool __weak bpf_jit_supports_exceptions(void)
-{
-	return false;
-}
-
-bool __weak bpf_jit_supports_private_stack(void)
 {
 	return false;
 }

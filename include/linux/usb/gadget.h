@@ -100,7 +100,6 @@ struct usb_ep;
  */
 
 struct usb_request {
-	struct usb_ep		*ep;
 	void			*buf;
 	unsigned		length;
 	dma_addr_t		dma;
@@ -126,6 +125,8 @@ struct usb_request {
 
 	int			status;
 	unsigned		actual;
+
+	ANDROID_KABI_USE(1, struct usb_ep *ep);
 };
 
 /*-------------------------------------------------------------------------*/
@@ -156,6 +157,8 @@ struct usb_ep_ops {
 
 	int (*fifo_status) (struct usb_ep *ep);
 	void (*fifo_flush) (struct usb_ep *ep);
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /**
@@ -244,6 +247,8 @@ struct usb_ep {
 	u16			maxpacket;
 	u16			maxpacket_limit;
 	u16			max_streams;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 /*-------------------------------------------------------------------------*/
@@ -358,6 +363,11 @@ struct usb_gadget_ops {
 			struct usb_endpoint_descriptor *,
 			struct usb_ss_ep_comp_descriptor *);
 	int	(*check_config)(struct usb_gadget *gadget);
+
+	ANDROID_KABI_RESERVE(1);
+	ANDROID_KABI_RESERVE(2);
+	ANDROID_KABI_RESERVE(3);
+	ANDROID_KABI_RESERVE(4);
 };
 
 /**
@@ -376,9 +386,6 @@ struct usb_gadget_ops {
  *	can handle. The UDC must support this and all slower speeds and lower
  *	number of lanes.
  * @state: the state we are now (attached, suspended, configured, etc)
- * @state_lock: Spinlock protecting the `state` and `teardown` members.
- * @teardown: True if the device is undergoing teardown, used to prevent
- *	new work from being scheduled during cleanup.
  * @name: Identifies the controller hardware type.  Used in diagnostics
  *	and sometimes configuration.
  * @dev: Driver model state for this abstract device.
@@ -454,8 +461,6 @@ struct usb_gadget {
 	enum usb_ssp_rate		max_ssp_rate;
 
 	enum usb_device_state		state;
-	spinlock_t			state_lock;
-	bool				teardown;
 	const char			*name;
 	struct device			dev;
 	unsigned			isoch_delay;

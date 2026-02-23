@@ -27,6 +27,7 @@
 #include <linux/acpi.h>
 #include <linux/pci.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/pinctrl/devinfo.h>
 #include <linux/reset.h>
 #include <linux/bitfield.h>
 
@@ -155,6 +156,7 @@ void dwc3_set_prtcap(struct dwc3 *dwc, u32 mode, bool ignore_susphy)
 	dwc3_writel(dwc->regs, DWC3_GCTL, reg);
 
 	dwc->current_dr_role = mode;
+	trace_dwc3_set_prtcap(mode);
 }
 
 static void __dwc3_set_mode(struct work_struct *work)
@@ -1726,6 +1728,7 @@ static void dwc3_get_properties(struct dwc3 *dwc)
 	u8			tx_max_burst_prd = 0;
 	u8			tx_fifo_resize_max_num;
 	u8			axi_pipe_limit;
+	u16			num_hc_interrupters;
 
 	/* default to highest possible threshold */
 	lpm_nyet_threshold = 0xf;
@@ -1745,6 +1748,9 @@ static void dwc3_get_properties(struct dwc3 *dwc)
 	 * for endpoints that have a large bMaxBurst value.
 	 */
 	tx_fifo_resize_max_num = 6;
+
+	/* default to a single XHCI interrupter */
+	num_hc_interrupters = 1;
 
 	/* Default to 0 (don't override hardware defaults) */
 	axi_pipe_limit = 0;
@@ -1795,6 +1801,12 @@ static void dwc3_get_properties(struct dwc3 *dwc)
 				&tx_thr_num_pkt_prd);
 	device_property_read_u8(dev, "snps,tx-max-burst-prd",
 				&tx_max_burst_prd);
+	device_property_read_u16(dev, "num-hc-interrupters",
+				 &num_hc_interrupters);
+	/* DWC3 core allowed to have a max of 8 interrupters */
+	if (num_hc_interrupters > 8)
+		num_hc_interrupters = 8;
+
 	dwc->do_fifo_resize = device_property_read_bool(dev,
 							"tx-fifo-resize");
 	if (dwc->do_fifo_resize)
@@ -1892,6 +1904,8 @@ static void dwc3_get_properties(struct dwc3 *dwc)
 	dwc->axi_pipe_limit = axi_pipe_limit;
 
 	dwc->tx_fifo_resize_max_num = tx_fifo_resize_max_num;
+
+	dwc->num_hc_interrupters = num_hc_interrupters;
 }
 
 /* check whether the core supports IMOD */
@@ -2710,14 +2724,31 @@ static void dwc3_complete(struct device *dev)
 		dwc3_writel(dwc->regs, DWC3_GUCTL3, reg);
 	}
 }
+
+static int dwc3_prepare(struct device *dev)
+{
+	struct dwc3	*dwc = dev_get_drvdata(dev);
+
+	/*
+	 * Indicate to the PM core that it may safely leave the device in
+	 * runtime suspend if runtime-suspended already in device mode.
+	 */
+	if (dwc->current_dr_role == DWC3_GCTL_PRTCAP_DEVICE &&
+	    pm_runtime_suspended(dev) &&
+	    !dev_pinctrl(dev))
+		return 1;
+
+	return 0;
+}
 #else
 #define dwc3_complete NULL
+#define dwc3_prepare NULL
 #endif /* CONFIG_PM_SLEEP */
 
 static const struct dev_pm_ops dwc3_dev_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(dwc3_suspend, dwc3_resume)
 	.complete = dwc3_complete,
-
+	.prepare = dwc3_prepare,
 	/*
 	 * Runtime suspend halts the controller on disconnection. It relies on
 	 * platforms with custom connection notification to start the controller

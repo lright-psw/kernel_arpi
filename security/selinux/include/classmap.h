@@ -96,7 +96,9 @@ const struct security_class_mapping secclass_map[] = {
 	{ "shm", { COMMON_IPC_PERMS, "lock", NULL } },
 	{ "ipc", { COMMON_IPC_PERMS, NULL } },
 	{ "netlink_route_socket",
-	  { COMMON_SOCK_PERMS, "nlmsg_read", "nlmsg_write", NULL } },
+	  { COMMON_SOCK_PERMS,
+	    "nlmsg_read", "nlmsg_write", "nlmsg_readpriv", "nlmsg_getneigh",
+	    NULL } },
 	{ "netlink_tcpdiag_socket",
 	  { COMMON_SOCK_PERMS, "nlmsg_read", "nlmsg_write", NULL } },
 	{ "netlink_nflog_socket", { COMMON_SOCK_PERMS, NULL } },
@@ -178,6 +180,8 @@ const struct security_class_mapping secclass_map[] = {
 	{ "anon_inode", { COMMON_FILE_PERMS, NULL } },
 	{ "io_uring", { "override_creds", "sqpoll", "cmd", NULL } },
 	{ "user_namespace", { "create", NULL } },
+	{ "memfd_file",
+	  { COMMON_FILE_PERMS, "execute_no_trans", "entrypoint", NULL } },
 	{ NULL }
 };
 

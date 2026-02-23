@@ -388,6 +388,9 @@ alternative_endif
 	.macro dcache_by_myline_op op, domain, start, end, linesz, tmp, fixup
 	sub	\tmp, \linesz, #1
 	bic	\start, \start, \tmp
+alternative_if ARM64_WORKAROUND_4311569
+	mov	\tmp, \start
+alternative_else_nop_endif
 .Ldcache_op\@:
 	.ifc	\op, cvau
 	__dcache_op_workaround_clean_cache \op, \start
@@ -409,6 +412,13 @@ alternative_endif
 	add	\start, \start, \linesz
 	cmp	\start, \end
 	b.lo	.Ldcache_op\@
+alternative_if ARM64_WORKAROUND_4311569
+	.ifnc	\op, cvau
+	mov	\start, \tmp
+	mov	\tmp, xzr
+	cbnz	\start, .Ldcache_op\@
+	.endif
+alternative_else_nop_endif
 	dsb	\domain
 
 	_cond_uaccess_extable .Ldcache_op\@, \fixup
@@ -873,4 +883,19 @@ alternative_cb ARM64_ALWAYS_SYSTEM, spectre_bhb_patch_clearbhb
 alternative_cb_end
 #endif /* CONFIG_MITIGATE_SPECTRE_BRANCH_HISTORY */
 	.endm
+
+#if defined(__KVM_NVHE_HYPERVISOR__)
+/*
+ * pKVM uses the module_ops struct to expose services to modules but
+ * doesn't allow fine-grained definition of the license for each export,
+ * and doesn't have a way to check the license of the loaded module.
+ * Given that said module may be proprietary, let's seek GPL compliance
+ * by preventing the accidental export of GPL symbols to hyp modules via
+ * pKVM's module_ops struct.
+ */
+#ifdef EXPORT_SYMBOL_GPL
+#undef EXPORT_SYMBOL_GPL
+#endif
+#define EXPORT_SYMBOL_GPL(sym) ASM_BUILD_BUG()
+#endif
 #endif	/* __ASM_ASSEMBLER_H */

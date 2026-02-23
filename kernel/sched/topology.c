@@ -4,8 +4,12 @@
  */
 
 #include <linux/bsearch.h>
+#include <trace/hooks/sched.h>
 
 DEFINE_MUTEX(sched_domains_mutex);
+#ifdef CONFIG_LOCKDEP
+EXPORT_SYMBOL_GPL(sched_domains_mutex);
+#endif
 
 /* Protected by sched_domains_mutex: */
 static cpumask_var_t sched_domains_tmpmask;
@@ -208,6 +212,7 @@ sd_parent_degenerate(struct sched_domain *sd, struct sched_domain *parent)
 
 #if defined(CONFIG_ENERGY_MODEL) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL)
 DEFINE_STATIC_KEY_FALSE(sched_energy_present);
+EXPORT_SYMBOL_GPL(sched_energy_present);
 static unsigned int sysctl_sched_energy_aware = 1;
 static DEFINE_MUTEX(sched_energy_mutex);
 static bool sched_energy_update;
@@ -218,6 +223,11 @@ static bool sched_is_eas_possible(const struct cpumask *cpu_mask)
 	struct cpufreq_policy *policy;
 	struct cpufreq_governor *gov;
 	int i;
+	bool eas_check = false;
+
+	trace_android_rvh_build_perf_domains(&eas_check);
+	if (eas_check)
+		return true;
 
 	/* EAS is enabled for asymmetric CPU capacity topologies. */
 	for_each_cpu(i, cpu_mask) {
@@ -1632,12 +1642,6 @@ sd_init(struct sched_domain_topology_level *tl,
 
 		.last_balance		= jiffies,
 		.balance_interval	= sd_weight,
-
-		/* 50% success rate */
-		.newidle_call		= 512,
-		.newidle_success	= 256,
-		.newidle_ratio		= 512,
-
 		.max_newidle_lb_cost	= 0,
 		.last_decay_max_lb_cost	= jiffies,
 		.child			= child,
@@ -2545,6 +2549,7 @@ build_sched_domains(const struct cpumask *cpu_map, struct sched_domain_attr *att
 
 	if (rq && sched_debug_verbose)
 		pr_info("root domain span: %*pbl\n", cpumask_pr_args(cpu_map));
+	trace_android_vh_build_sched_domains(has_asym);
 
 	ret = 0;
 error:

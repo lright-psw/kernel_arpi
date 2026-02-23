@@ -159,6 +159,7 @@
 #include <net/page_pool/helpers.h>
 #include <net/rps.h>
 #include <linux/phy_link_topology.h>
+#include <trace/hooks/net.h>
 
 #include "dev.h"
 #include "devmem.h"
@@ -1024,6 +1025,7 @@ out:
 	rcu_read_unlock();
 	return ret;
 }
+EXPORT_SYMBOL_GPL(netdev_get_name);
 
 static bool dev_addr_cmp(struct net_device *dev, unsigned short type,
 			 const char *ha)
@@ -3673,6 +3675,9 @@ static int xmit_one(struct sk_buff *skb, struct net_device *dev,
 
 	len = skb->len;
 	trace_net_dev_start_xmit(skb, dev);
+
+	trace_android_vh_dc_send_copy(skb, dev);
+
 	rc = netdev_start_xmit(skb, dev, txq, more);
 	trace_net_dev_xmit(skb, rc, dev, len);
 
@@ -5560,6 +5565,7 @@ static int __netif_receive_skb_core(struct sk_buff **pskb, bool pfmemalloc,
 	bool deliver_exact = false;
 	int ret = NET_RX_DROP;
 	__be16 type;
+	int flag = 0;
 
 	net_timestamp_check(!READ_ONCE(net_hotdata.tstamp_prequeue), skb);
 
@@ -5578,6 +5584,10 @@ another_round:
 	skb->skb_iif = skb->dev->ifindex;
 
 	__this_cpu_inc(softnet_data.processed);
+
+	trace_android_vh_dc_receive(skb, &flag);
+	if (flag != 0)
+		return NET_RX_DROP;
 
 	if (static_branch_unlikely(&generic_xdp_needed_key)) {
 		int ret2;

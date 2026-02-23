@@ -8,6 +8,7 @@
 #ifndef _LINUX_CGROUP_DEFS_H
 #define _LINUX_CGROUP_DEFS_H
 
+#include <linux/android_kabi.h>
 #include <linux/limits.h>
 #include <linux/list.h>
 #include <linux/idr.h>
@@ -219,6 +220,8 @@ struct cgroup_subsys_state {
 	 * Protected by cgroup_mutex.
 	 */
 	int nr_descendants;
+
+	ANDROID_BACKPORT_RESERVE(1);
 };
 
 /*
@@ -316,6 +319,8 @@ struct css_set {
 
 	/* For RCU-protected deletion */
 	struct rcu_head rcu_head;
+
+	ANDROID_BACKPORT_RESERVE(1);
 };
 
 struct cgroup_base_stat {
@@ -407,7 +412,42 @@ struct cgroup_freezer_state {
 	 * frozen, SIGSTOPped, and PTRACEd.
 	 */
 	int nr_frozen_tasks;
+
 };
+
+/**
+ * struct cgroup_kmi_ext_info is meant to hold extensions to struct cgroup while
+ * maintaining KMI stability. This type is meant to be opaque to vendor modules.
+ */
+struct cgroup_kmi_ext_info {
+	/*
+	 * Metadata for cgroup v2 freeze time. Writes protected
+	 * by css_set_lock.
+	 */
+	struct {
+		/* Freeze time data consistency protection */
+		seqcount_t freeze_seq;
+
+		/*
+		 * Most recent time the cgroup was requested to freeze.
+		 * Accesses guarded by freeze_seq counter. Writes serialized
+		 * by css_set_lock.
+		 */
+		u64 freeze_start_nsec;
+
+		/*
+		 * Total duration the cgroup has spent freezing.
+		 * Accesses guarded by freeze_seq counter. Writes serialized
+		 * by css_set_lock.
+		 */
+		u64 frozen_nsec;
+	} freezer;
+};
+/*
+ * Hide the definition of struct cgroup_kmi_ext_info from the ABI so that it
+ * can be modified to accommodate additional backports in the future.
+ */
+ANDROID_KABI_DECLONLY(cgroup_kmi_ext_info);
 
 struct cgroup {
 	/* self css with NULL ->ss, points back to this cgroup */
@@ -565,6 +605,13 @@ struct cgroup {
 	struct bpf_local_storage __rcu  *bpf_cgrp_storage;
 #endif
 
+	/*
+	 * Used to store KMI-compliant extensions to struct cgroup.
+	 * For further additions, modify the definition for struct
+	 * cgroup_kmi_ext_info.
+	 */
+	ANDROID_BACKPORT_USE(1, struct cgroup_kmi_ext_info *kmi_ext_info);
+
 	/* All ancestors including self */
 	struct cgroup *ancestors[];
 };
@@ -608,6 +655,8 @@ struct cgroup_root {
 
 	/* The name for this hierarchy - may be empty */
 	char name[MAX_CGROUP_ROOT_NAMELEN];
+
+	ANDROID_BACKPORT_RESERVE(1);
 };
 
 /*
@@ -791,6 +840,8 @@ struct cgroup_subsys {
 	 * specifies the mask of subsystems that this one depends on.
 	 */
 	unsigned int depends_on;
+
+	ANDROID_BACKPORT_RESERVE(1);
 };
 
 extern struct percpu_rw_semaphore cgroup_threadgroup_rwsem;

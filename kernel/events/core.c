@@ -46,6 +46,7 @@
 #include <linux/filter.h>
 #include <linux/namei.h>
 #include <linux/parser.h>
+#include <linux/page_size_compat.h>
 #include <linux/sched/clock.h>
 #include <linux/sched/mm.h>
 #include <linux/proc_ns.h>
@@ -4776,6 +4777,7 @@ out:
 
 	return ret;
 }
+EXPORT_SYMBOL_GPL(perf_event_read_local);
 
 static int perf_event_read(struct perf_event *event, bool group)
 {
@@ -6275,7 +6277,7 @@ static void perf_event_init_userpage(struct perf_event *event)
 	/* Allow new userspace to detect that bit 0 is deprecated */
 	userpg->cap_bit0_is_deprecated = 1;
 	userpg->size = offsetof(struct perf_event_mmap_page, __reserved);
-	userpg->data_offset = PAGE_SIZE;
+	userpg->data_offset = __PAGE_SIZE;
 	userpg->data_size = perf_data_size(rb);
 
 unlock:
@@ -6665,7 +6667,7 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 	vma_size = vma->vm_end - vma->vm_start;
 
 	if (vma->vm_pgoff == 0) {
-		nr_pages = (vma_size / PAGE_SIZE) - 1;
+		nr_pages = (vma_size / PAGE_SIZE) - (__PAGE_SIZE / PAGE_SIZE);
 	} else {
 		/*
 		 * AUX area mapping: if rb->aux_nr_pages != 0, it's already
@@ -6734,7 +6736,7 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 	if (nr_pages != 0 && !is_power_of_2(nr_pages))
 		return -EINVAL;
 
-	if (vma_size != PAGE_SIZE * (1 + nr_pages))
+	if (vma_size != PAGE_SIZE * ((__PAGE_SIZE / PAGE_SIZE) + nr_pages))
 		return -EINVAL;
 
 	WARN_ON_ONCE(event->ctx->parent_ctx);
@@ -7038,23 +7040,12 @@ static void perf_pending_task(struct callback_head *head)
 #ifdef CONFIG_GUEST_PERF_EVENTS
 struct perf_guest_info_callbacks __rcu *perf_guest_cbs;
 
-DEFINE_STATIC_CALL_RET0(__perf_guest_state, *perf_guest_cbs->state);
-DEFINE_STATIC_CALL_RET0(__perf_guest_get_ip, *perf_guest_cbs->get_ip);
-DEFINE_STATIC_CALL_RET0(__perf_guest_handle_intel_pt_intr, *perf_guest_cbs->handle_intel_pt_intr);
-
 void perf_register_guest_info_callbacks(struct perf_guest_info_callbacks *cbs)
 {
 	if (WARN_ON_ONCE(rcu_access_pointer(perf_guest_cbs)))
 		return;
 
 	rcu_assign_pointer(perf_guest_cbs, cbs);
-	static_call_update(__perf_guest_state, cbs->state);
-	static_call_update(__perf_guest_get_ip, cbs->get_ip);
-
-	/* Implementing ->handle_intel_pt_intr is optional. */
-	if (cbs->handle_intel_pt_intr)
-		static_call_update(__perf_guest_handle_intel_pt_intr,
-				   cbs->handle_intel_pt_intr);
 }
 EXPORT_SYMBOL_GPL(perf_register_guest_info_callbacks);
 
@@ -7064,10 +7055,6 @@ void perf_unregister_guest_info_callbacks(struct perf_guest_info_callbacks *cbs)
 		return;
 
 	rcu_assign_pointer(perf_guest_cbs, NULL);
-	static_call_update(__perf_guest_state, (void *)&__static_call_return0);
-	static_call_update(__perf_guest_get_ip, (void *)&__static_call_return0);
-	static_call_update(__perf_guest_handle_intel_pt_intr,
-			   (void *)&__static_call_return0);
 	synchronize_rcu();
 }
 EXPORT_SYMBOL_GPL(perf_unregister_guest_info_callbacks);

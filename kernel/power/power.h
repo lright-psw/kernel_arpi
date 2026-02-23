@@ -18,6 +18,10 @@ struct swsusp_info {
 	unsigned long		size;
 } __aligned(PAGE_SIZE);
 
+#if defined(CONFIG_SUSPEND) || defined(CONFIG_HIBERNATION)
+extern int pm_sleep_fs_sync(void);
+#endif
+
 #ifdef CONFIG_HIBERNATION
 /* kernel/power/snapshot.c */
 extern void __init hibernate_reserved_size_init(void);
@@ -350,5 +354,3 @@ static inline void pm_sleep_enable_secondary_cpus(void)
 	suspend_enable_secondary_cpus();
 	cpuidle_resume();
 }
-
-void dpm_save_errno(int err);

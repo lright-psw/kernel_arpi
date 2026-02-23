@@ -53,6 +53,9 @@
 #define  SCSI_INLINE_SG_CNT  2
 #endif
 
+EXPORT_TRACEPOINT_SYMBOL_GPL(scsi_dispatch_cmd_start);
+EXPORT_TRACEPOINT_SYMBOL_GPL(scsi_dispatch_cmd_done);
+
 static struct kmem_cache *scsi_sense_cache;
 static DEFINE_MUTEX(scsi_sense_cache_mutex);
 
@@ -395,6 +398,8 @@ void scsi_device_unbusy(struct scsi_device *sdev, struct scsi_cmnd *cmd)
 {
 	struct Scsi_Host *shost = sdev->host;
 	struct scsi_target *starget = scsi_target(sdev);
+
+	WARN_ON_ONCE(cmd->budget_token < 0);
 
 	scsi_dec_host_busy(shost, cmd);
 
@@ -2082,7 +2087,8 @@ int scsi_mq_setup_tags(struct Scsi_Host *shost)
 		tag_set->ops = &scsi_mq_ops_no_commit;
 	tag_set->nr_hw_queues = shost->nr_hw_queues ? : 1;
 	tag_set->nr_maps = shost->nr_maps ? : 1;
-	tag_set->queue_depth = shost->can_queue;
+	tag_set->queue_depth = shost->can_queue + shost->nr_reserved_cmds;
+	tag_set->reserved_tags = shost->nr_reserved_cmds;
 	tag_set->cmd_size = cmd_size;
 	tag_set->numa_node = dev_to_node(shost->dma_dev);
 	tag_set->flags = BLK_MQ_F_SHOULD_MERGE;

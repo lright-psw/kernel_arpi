@@ -33,6 +33,12 @@
 #include <linux/bitfield.h>
 #include "pci.h"
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/pci.h>
+
+#include <linux/android_kabi.h>
+ANDROID_KABI_DECLONLY(trace_eval_map);
+
 DEFINE_MUTEX(pci_slot_mutex);
 
 const char *pci_power_names[] = {
@@ -1064,7 +1070,7 @@ static void pci_std_enable_acs(struct pci_dev *dev, struct pci_acs *caps)
 	caps->ctrl |= (caps->cap & PCI_ACS_UF);
 
 	/* Enable Translation Blocking for external devices and noats */
-	if (pci_ats_disabled() || dev->external_facing || dev->untrusted)
+	if (pci_ats_disabled() || dev->external_facing || dev->requires_dma_protection)
 		caps->ctrl |= (caps->cap & PCI_ACS_TB);
 }
 
@@ -1152,27 +1158,45 @@ static void pci_restore_bars(struct pci_dev *dev)
 
 static inline bool platform_pci_power_manageable(struct pci_dev *dev)
 {
-	if (pci_use_mid_pm())
-		return true;
+	bool ret;
 
-	return acpi_pci_power_manageable(dev);
+	if (pci_use_mid_pm())
+		ret = true;
+	else
+		ret = acpi_pci_power_manageable(dev);
+
+	trace_android_vh_platform_pci_power_manageable(dev, &ret);
+
+	return ret;
 }
 
 static inline int platform_pci_set_power_state(struct pci_dev *dev,
 					       pci_power_t t)
 {
-	if (pci_use_mid_pm())
-		return mid_pci_set_power_state(dev, t);
+	int ret;
 
-	return acpi_pci_set_power_state(dev, t);
+	if (pci_use_mid_pm())
+		ret = mid_pci_set_power_state(dev, t);
+	else
+		ret = acpi_pci_set_power_state(dev, t);
+
+	trace_android_vh_platform_pci_set_power_state(dev, t, &ret);
+
+	return ret;
 }
 
 static inline pci_power_t platform_pci_get_power_state(struct pci_dev *dev)
 {
-	if (pci_use_mid_pm())
-		return mid_pci_get_power_state(dev);
+	pci_power_t state;
 
-	return acpi_pci_get_power_state(dev);
+	if (pci_use_mid_pm())
+		state = mid_pci_get_power_state(dev);
+	else
+		state = acpi_pci_get_power_state(dev);
+
+	trace_android_vh_platform_pci_get_power_state(dev, &state);
+
+	return state;
 }
 
 static inline void platform_pci_refresh_power_state(struct pci_dev *dev)
@@ -1183,10 +1207,16 @@ static inline void platform_pci_refresh_power_state(struct pci_dev *dev)
 
 static inline pci_power_t platform_pci_choose_state(struct pci_dev *dev)
 {
-	if (pci_use_mid_pm())
-		return PCI_POWER_ERROR;
+	pci_power_t state;
 
-	return acpi_pci_choose_state(dev);
+	if (pci_use_mid_pm())
+		state = PCI_POWER_ERROR;
+	else
+		state = acpi_pci_choose_state(dev);
+
+	trace_android_vh_platform_pci_choose_state(dev, &state);
+
+	return state;
 }
 
 static inline int platform_pci_set_wakeup(struct pci_dev *dev, bool enable)
@@ -1572,6 +1602,9 @@ static int pci_set_low_power_state(struct pci_dev *dev, pci_power_t state, bool 
 	if ((state == PCI_D1 && !dev->d1_support)
 	   || (state == PCI_D2 && !dev->d2_support))
 		return -EIO;
+
+	if (dev->current_state == state)
+		return 0;
 
 	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr);
 	if (PCI_POSSIBLE_ERROR(pmcsr)) {
@@ -3202,8 +3235,13 @@ void pci_pm_init(struct pci_dev *dev)
 	u16 pmc;
 
 	pm_runtime_forbid(&dev->dev);
+	/*
+	 * Runtime PM will be enabled for the device when it has been fully
+	 * configured, but since its parent and suppliers may suspend in
+	 * the meantime, prevent them from doing so by changing the
+	 * device's runtime PM status to "active".
+	 */
 	pm_runtime_set_active(&dev->dev);
-	pm_runtime_enable(&dev->dev);
 	device_enable_async_suspend(&dev->dev);
 	dev->wakeup_prepared = false;
 
@@ -4782,7 +4820,7 @@ static bool pcie_wait_for_link_delay(struct pci_dev *pdev, bool active,
 
 	/*
 	 * PCIe r4.0 sec 6.6.1, a component must enter LTSSM Detect within 20ms,
-	 * after which we should expect an link active if the reset was
+	 * after which we should expect the link to be active if the reset was
 	 * successful. If so, software must wait a minimum 100ms before sending
 	 * configuration requests to devices downstream this port.
 	 *

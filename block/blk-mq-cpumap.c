@@ -87,6 +87,7 @@ void blk_mq_map_hw_queues(struct blk_mq_queue_map *qmap,
 	return;
 
 fallback:
-	blk_mq_map_queues(qmap);
+	WARN_ON_ONCE(qmap->nr_queues > 1);
+	blk_mq_clear_mq_map(qmap);
 }
 EXPORT_SYMBOL_GPL(blk_mq_map_hw_queues);

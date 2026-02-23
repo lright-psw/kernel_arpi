@@ -72,11 +72,14 @@
 #include <linux/uaccess.h>
 
 #include <trace/events/vmscan.h>
+#include <trace/hooks/mm.h>
+#include <trace/hooks/vmscan.h>
 
 struct cgroup_subsys memory_cgrp_subsys __read_mostly;
 EXPORT_SYMBOL(memory_cgrp_subsys);
 
 struct mem_cgroup *root_mem_cgroup __read_mostly;
+EXPORT_SYMBOL_GPL(root_mem_cgroup);
 
 /* Active memory cgroup to use from an interrupt context */
 DEFINE_PER_CPU(struct mem_cgroup *, int_active_memcg);
@@ -90,6 +93,9 @@ static bool cgroup_memory_nokmem __ro_after_init;
 
 /* BPF memory accounting disabled? */
 static bool cgroup_memory_nobpf __ro_after_init;
+
+static struct kmem_cache *memcg_cachep;
+static struct kmem_cache *memcg_pn_cachep;
 
 #ifdef CONFIG_CGROUP_WRITEBACK
 static DECLARE_WAIT_QUEUE_HEAD(memcg_cgwb_frn_waitq);
@@ -112,6 +118,16 @@ struct vmpressure *memcg_to_vmpressure(struct mem_cgroup *memcg)
 struct mem_cgroup *vmpressure_to_memcg(struct vmpressure *vmpr)
 {
 	return container_of(vmpr, struct mem_cgroup, vmpressure);
+}
+
+/*
+ * trace_android_vh_use_vm_swappiness is called in include/linux/swap.h by
+ * including include/trace/hooks/vmscan.h, which will result to build-err.
+ * So we create func: _trace_android_vh_use_vm_swappiness.
+ */
+void _trace_android_vh_use_vm_swappiness(bool *use_vm_swappiness)
+{
+	trace_android_vh_use_vm_swappiness(use_vm_swappiness);
 }
 
 #define CURRENT_OBJCG_UPDATE_BIT 0
@@ -388,6 +404,7 @@ unsigned long lruvec_page_state(struct lruvec *lruvec, enum node_stat_item idx)
 #endif
 	return x;
 }
+EXPORT_SYMBOL_GPL(lruvec_page_state);
 
 unsigned long lruvec_page_state_local(struct lruvec *lruvec,
 				      enum node_stat_item idx)
@@ -649,6 +666,13 @@ unsigned long memcg_page_state(struct mem_cgroup *memcg, int idx)
 #endif
 	return x;
 }
+EXPORT_SYMBOL_GPL(memcg_page_state);
+
+/* For type visibility of memcg_page_state indices */
+const enum node_stat_item ANDROID_GKI_node_stat_item;
+EXPORT_SYMBOL_GPL(ANDROID_GKI_node_stat_item);
+const enum memcg_stat_item ANDROID_GKI_memcg_stat_item;
+EXPORT_SYMBOL_GPL(ANDROID_GKI_memcg_stat_item);
 
 static int memcg_page_state_unit(int item);
 
@@ -767,6 +791,7 @@ void __mod_lruvec_state(struct lruvec *lruvec, enum node_stat_item idx,
 	if (!mem_cgroup_disabled())
 		__mod_memcg_lruvec_state(lruvec, idx, val);
 }
+EXPORT_SYMBOL_GPL(__mod_lruvec_state);
 
 void __lruvec_stat_mod_folio(struct folio *folio, enum node_stat_item idx,
 			     int val)
@@ -1247,6 +1272,34 @@ struct lruvec *folio_lruvec_lock_irqsave(struct folio *folio,
 	return lruvec;
 }
 
+void do_traversal_all_lruvec(int (*callback)(struct mem_cgroup *memcg,
+					     struct lruvec *lruvec,
+					     void *private),
+			     void *private)
+{
+	pg_data_t *pgdat;
+	int ret;
+
+	for_each_online_pgdat(pgdat) {
+		struct mem_cgroup *memcg = NULL;
+
+		memcg = mem_cgroup_iter(NULL, NULL, NULL);
+		do {
+			struct lruvec *lruvec = mem_cgroup_lruvec(memcg, pgdat);
+
+			ret = callback(memcg, lruvec, private);
+			if (ret) {
+				mem_cgroup_iter_break(NULL, memcg);
+				break;
+			}
+
+			memcg = mem_cgroup_iter(NULL, memcg, NULL);
+		} while (memcg);
+	}
+}
+EXPORT_SYMBOL_GPL(do_traversal_all_lruvec);
+
+
 /**
  * mem_cgroup_update_lru_size - account for adding or removing an lru page
  * @lruvec: mem_cgroup per zone lru vector
@@ -1284,6 +1337,7 @@ void mem_cgroup_update_lru_size(struct lruvec *lruvec, enum lru_list lru,
 	if (nr_pages > 0)
 		*lru_size += nr_pages;
 }
+EXPORT_SYMBOL_GPL(mem_cgroup_update_lru_size);
 
 /**
  * mem_cgroup_margin - calculate chargeable space of a memory cgroup
@@ -3368,6 +3422,7 @@ static DEFINE_XARRAY_ALLOC1(mem_cgroup_ids);
 static void mem_cgroup_id_remove(struct mem_cgroup *memcg)
 {
 	if (memcg->id.id > 0) {
+		trace_android_vh_mem_cgroup_id_remove(memcg);
 		xa_erase(&mem_cgroup_ids, memcg->id.id);
 		memcg->id.id = 0;
 	}
@@ -3405,6 +3460,7 @@ struct mem_cgroup *mem_cgroup_from_id(unsigned short id)
 	WARN_ON_ONCE(!rcu_read_lock_held());
 	return xa_load(&mem_cgroup_ids, id);
 }
+EXPORT_SYMBOL_GPL(mem_cgroup_from_id);
 
 #ifdef CONFIG_SHRINKER_DEBUG
 struct mem_cgroup *mem_cgroup_get_from_ino(unsigned long ino)
@@ -3433,7 +3489,8 @@ static bool alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
 {
 	struct mem_cgroup_per_node *pn;
 
-	pn = kzalloc_node(sizeof(*pn), GFP_KERNEL, node);
+	pn = kmem_cache_alloc_node(memcg_pn_cachep, GFP_KERNEL | __GFP_ZERO,
+				   node);
 	if (!pn)
 		return false;
 
@@ -3474,6 +3531,7 @@ static void __mem_cgroup_free(struct mem_cgroup *memcg)
 {
 	int node;
 
+	trace_android_vh_mem_cgroup_free(memcg);
 	obj_cgroup_put(memcg->orig_objcg);
 
 	for_each_node(node)
@@ -3499,7 +3557,7 @@ static struct mem_cgroup *mem_cgroup_alloc(struct mem_cgroup *parent)
 	int __maybe_unused i;
 	long error;
 
-	memcg = kzalloc(struct_size(memcg, nodeinfo, nr_node_ids), GFP_KERNEL);
+	memcg = kmem_cache_zalloc(memcg_cachep, GFP_KERNEL);
 	if (!memcg)
 		return ERR_PTR(-ENOMEM);
 
@@ -3558,6 +3616,7 @@ static struct mem_cgroup *mem_cgroup_alloc(struct mem_cgroup *parent)
 	memcg->deferred_split_queue.split_queue_len = 0;
 #endif
 	lru_gen_init_memcg(memcg);
+	trace_android_vh_mem_cgroup_alloc(memcg);
 	return memcg;
 fail:
 	mem_cgroup_id_remove(memcg);
@@ -3651,6 +3710,7 @@ static int mem_cgroup_css_online(struct cgroup_subsys_state *css)
 	 * regular ID destruction during offlining.
 	 */
 	xa_store(&mem_cgroup_ids, memcg->id.id, memcg, GFP_KERNEL);
+	trace_android_vh_mem_cgroup_css_online(css, memcg);
 
 	return 0;
 offline_kmem:
@@ -3664,6 +3724,7 @@ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
 {
 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
 
+	trace_android_vh_mem_cgroup_css_offline(css, memcg);
 	memcg1_css_offline(memcg);
 
 	page_counter_set_min(&memcg->memory, 0);
@@ -4496,6 +4557,7 @@ int __mem_cgroup_charge(struct folio *folio, struct mm_struct *mm, gfp_t gfp)
 	int ret;
 
 	memcg = get_mem_cgroup_from_mm(mm);
+	trace_android_vh_mem_cgroup_charge(folio, &memcg);
 	ret = charge_memcg(folio, memcg, gfp);
 	css_put(&memcg->css);
 
@@ -4596,7 +4658,7 @@ void mem_cgroup_swapin_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
 	 * correspond 1:1 to page and swap slot lifetimes: we charge the
 	 * page to memory here, and uncharge swap when the slot is freed.
 	 */
-	if (!mem_cgroup_disabled() && do_memsw_account()) {
+	if (do_memsw_account()) {
 		/*
 		 * The swap entry might not get freed for a long time,
 		 * let's not wait for it.  The page already received a
@@ -4900,15 +4962,16 @@ static int __init cgroup_memory(char *s)
 __setup("cgroup.memory=", cgroup_memory);
 
 /*
- * subsys_initcall() for memory controller.
+ * Memory controller init before cgroup_init() initialize root_mem_cgroup.
  *
  * Some parts like memcg_hotplug_cpu_dead() have to be initialized from this
  * context because of lock dependencies (cgroup_lock -> cpu hotplug) but
  * basically everything that doesn't depend on a specific mem_cgroup structure
  * should be initialized from here.
  */
-static int __init mem_cgroup_init(void)
+int __init mem_cgroup_init(void)
 {
+	unsigned int memcg_size;
 	int cpu;
 
 	/*
@@ -4926,9 +4989,15 @@ static int __init mem_cgroup_init(void)
 		INIT_WORK(&per_cpu_ptr(&memcg_stock, cpu)->work,
 			  drain_local_stock);
 
+	memcg_size = struct_size_t(struct mem_cgroup, nodeinfo, nr_node_ids);
+	memcg_cachep = kmem_cache_create("mem_cgroup", memcg_size, 0,
+					 SLAB_PANIC | SLAB_HWCACHE_ALIGN, NULL);
+
+	memcg_pn_cachep = KMEM_CACHE(mem_cgroup_per_node,
+				     SLAB_PANIC | SLAB_HWCACHE_ALIGN);
+
 	return 0;
 }
-subsys_initcall(mem_cgroup_init);
 
 #ifdef CONFIG_SWAP
 static struct mem_cgroup *mem_cgroup_id_get_online(struct mem_cgroup *memcg)
@@ -4960,7 +5029,6 @@ void mem_cgroup_swapout(struct folio *folio, swp_entry_t entry)
 {
 	struct mem_cgroup *memcg, *swap_memcg;
 	unsigned int nr_entries;
-	unsigned short oldid;
 
 	VM_BUG_ON_FOLIO(folio_test_lru(folio), folio);
 	VM_BUG_ON_FOLIO(folio_ref_count(folio), folio);
@@ -4987,10 +5055,9 @@ void mem_cgroup_swapout(struct folio *folio, swp_entry_t entry)
 	/* Get references for the tail pages, too */
 	if (nr_entries > 1)
 		mem_cgroup_id_get_many(swap_memcg, nr_entries - 1);
-	oldid = swap_cgroup_record(entry, mem_cgroup_id(swap_memcg),
-				   nr_entries);
-	VM_BUG_ON_FOLIO(oldid, folio);
 	mod_memcg_state(swap_memcg, MEMCG_SWAP, nr_entries);
+
+	swap_cgroup_record(folio, mem_cgroup_id(swap_memcg), entry);
 
 	folio_unqueue_deferred_split(folio);
 	folio->memcg_data = 0;
@@ -5022,7 +5089,6 @@ int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry)
 	unsigned int nr_pages = folio_nr_pages(folio);
 	struct page_counter *counter;
 	struct mem_cgroup *memcg;
-	unsigned short oldid;
 
 	if (do_memsw_account())
 		return 0;
@@ -5051,9 +5117,9 @@ int __mem_cgroup_try_charge_swap(struct folio *folio, swp_entry_t entry)
 	/* Get references for the tail pages, too */
 	if (nr_pages > 1)
 		mem_cgroup_id_get_many(memcg, nr_pages - 1);
-	oldid = swap_cgroup_record(entry, mem_cgroup_id(memcg), nr_pages);
-	VM_BUG_ON_FOLIO(oldid, folio);
 	mod_memcg_state(memcg, MEMCG_SWAP, nr_pages);
+
+	swap_cgroup_record(folio, mem_cgroup_id(memcg), entry);
 
 	return 0;
 }
@@ -5068,7 +5134,7 @@ void __mem_cgroup_uncharge_swap(swp_entry_t entry, unsigned int nr_pages)
 	struct mem_cgroup *memcg;
 	unsigned short id;
 
-	id = swap_cgroup_record(entry, 0, nr_pages);
+	id = swap_cgroup_clear(entry, nr_pages);
 	rcu_read_lock();
 	memcg = mem_cgroup_from_id(id);
 	if (memcg) {

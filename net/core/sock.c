@@ -141,6 +141,8 @@
 #include <net/bpf_sk_storage.h>
 
 #include <trace/events/sock.h>
+#include <trace/hooks/sched.h>
+#include <trace/hooks/net.h>
 
 #include <net/tcp.h>
 #include <net/busy_poll.h>
@@ -2204,6 +2206,7 @@ static void sk_prot_free(struct proto *prot, struct sock *sk)
 
 	cgroup_sk_free(&sk->sk_cgrp_data);
 	mem_cgroup_sk_free(sk);
+	trace_android_vh_sk_free(sk);
 	security_sk_free(sk);
 
 	sk_owner_put(sk);
@@ -2252,6 +2255,7 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 		refcount_set(&sk->sk_wmem_alloc, 1);
 
 		mem_cgroup_sk_alloc(sk);
+		trace_android_vh_sk_alloc(sk);
 		cgroup_sk_alloc(&sk->sk_cgrp_data);
 		sock_update_classid(&sk->sk_cgrp_data);
 		sock_update_netprioidx(&sk->sk_cgrp_data);
@@ -2405,6 +2409,7 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		goto out;
 
 	sock_copy(newsk, sk);
+	trace_android_vh_sk_clone_lock(newsk);
 
 	newsk->sk_prot_creator = prot;
 
@@ -2524,7 +2529,7 @@ void sk_free_unlock_clone(struct sock *sk)
 }
 EXPORT_SYMBOL_GPL(sk_free_unlock_clone);
 
-static u32 sk_dst_gso_max_size(struct sock *sk, const struct net_device *dev)
+static u32 sk_dst_gso_max_size(struct sock *sk, struct dst_entry *dst)
 {
 	bool is_ipv6 = false;
 	u32 max_size;
@@ -2534,8 +2539,8 @@ static u32 sk_dst_gso_max_size(struct sock *sk, const struct net_device *dev)
 		   !ipv6_addr_v4mapped(&sk->sk_v6_rcv_saddr));
 #endif
 	/* pairs with the WRITE_ONCE() in netif_set_gso(_ipv4)_max_size() */
-	max_size = is_ipv6 ? READ_ONCE(dev->gso_max_size) :
-			READ_ONCE(dev->gso_ipv4_max_size);
+	max_size = is_ipv6 ? READ_ONCE(dst_dev(dst)->gso_max_size) :
+			READ_ONCE(dst_dev(dst)->gso_ipv4_max_size);
 	if (max_size > GSO_LEGACY_MAX_SIZE && !sk_is_tcp(sk))
 		max_size = GSO_LEGACY_MAX_SIZE;
 
@@ -2544,12 +2549,9 @@ static u32 sk_dst_gso_max_size(struct sock *sk, const struct net_device *dev)
 
 void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 {
-	const struct net_device *dev;
 	u32 max_segs = 1;
 
-	rcu_read_lock();
-	dev = dst_dev_rcu(dst);
-	sk->sk_route_caps = dev->features;
+	sk->sk_route_caps = dst_dev(dst)->features;
 	if (sk_is_tcp(sk)) {
 		struct inet_connection_sock *icsk = inet_csk(sk);
 
@@ -2565,14 +2567,13 @@ void sk_setup_caps(struct sock *sk, struct dst_entry *dst)
 			sk->sk_route_caps &= ~NETIF_F_GSO_MASK;
 		} else {
 			sk->sk_route_caps |= NETIF_F_SG | NETIF_F_HW_CSUM;
-			sk->sk_gso_max_size = sk_dst_gso_max_size(sk, dev);
+			sk->sk_gso_max_size = sk_dst_gso_max_size(sk, dst);
 			/* pairs with the WRITE_ONCE() in netif_set_gso_max_segs() */
-			max_segs = max_t(u32, READ_ONCE(dev->gso_max_segs), 1);
+			max_segs = max_t(u32, READ_ONCE(dst_dev(dst)->gso_max_segs), 1);
 		}
 	}
 	sk->sk_gso_max_segs = max_segs;
 	sk_dst_set(sk, dst);
-	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(sk_setup_caps);
 
@@ -3442,6 +3443,7 @@ void __receive_sock(struct file *file)
 	if (sock) {
 		sock_update_netprioidx(&sock->sk->sk_cgrp_data);
 		sock_update_classid(&sock->sk->sk_cgrp_data);
+		trace_android_vh_receive_sock(sock->sk);
 	}
 }
 
@@ -3480,9 +3482,19 @@ void sock_def_readable(struct sock *sk)
 
 	rcu_read_lock();
 	wq = rcu_dereference(sk->sk_wq);
-	if (skwq_has_sleeper(wq))
+
+	if (skwq_has_sleeper(wq)) {
+		int done = 0;
+
+		trace_android_vh_do_wake_up_sync(&wq->wait, &done, sk);
+		if (done)
+			goto out;
+
 		wake_up_interruptible_sync_poll(&wq->wait, EPOLLIN | EPOLLPRI |
 						EPOLLRDNORM | EPOLLRDBAND);
+	}
+
+out:
 	sk_wake_async_rcu(sk, SOCK_WAKE_WAITD, POLL_IN);
 	rcu_read_unlock();
 }

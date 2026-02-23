@@ -12,6 +12,7 @@
  *  Copyright (C) 2004-2006 Ingo Molnar
  *  Copyright (C) 2004 Nadia Yvette Chambers
  */
+#include <linux/page_size_compat_defs.h>
 #include <linux/ring_buffer.h>
 #include <linux/utsname.h>
 #include <linux/stacktrace.h>
@@ -49,6 +50,7 @@
 #include <linux/fsnotify.h>
 #include <linux/irq_work.h>
 #include <linux/workqueue.h>
+#include <trace/hooks/ftrace_dump.h>
 
 #include <asm/setup.h> /* COMMAND_LINE_SIZE */
 
@@ -1066,7 +1068,6 @@ void tracing_on(void)
 {
 	tracer_tracing_on(&global_trace);
 }
-EXPORT_SYMBOL_GPL(tracing_on);
 
 
 static __always_inline void
@@ -1632,7 +1633,6 @@ int tracing_is_on(void)
 {
 	return tracer_tracing_is_on(&global_trace);
 }
-EXPORT_SYMBOL_GPL(tracing_is_on);
 
 static int __init set_buf_size(char *str)
 {
@@ -6953,7 +6953,7 @@ tracing_mark_write(struct file *filp, const char __user *ubuf,
 	entry = ring_buffer_event_data(event);
 	entry->ip = _THIS_IP_;
 
-	len = copy_from_user_nofault(&entry->buf, ubuf, cnt);
+	len = __copy_from_user_inatomic(&entry->buf, ubuf, cnt);
 	if (len) {
 		memcpy(&entry->buf, FAULTED_STR, FAULTED_SIZE);
 		cnt = FAULTED_SIZE;
@@ -7024,7 +7024,7 @@ tracing_mark_raw_write(struct file *filp, const char __user *ubuf,
 
 	entry = ring_buffer_event_data(event);
 
-	len = copy_from_user_nofault(&entry->id, ubuf, cnt);
+	len = __copy_from_user_inatomic(&entry->id, ubuf, cnt);
 	if (len) {
 		entry->id = -1;
 		memcpy(&entry->buf, FAULTED_STR, FAULTED_SIZE);
@@ -9132,6 +9132,7 @@ static ssize_t
 buffer_subbuf_size_write(struct file *filp, const char __user *ubuf,
 			 size_t cnt, loff_t *ppos)
 {
+	unsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;
 	struct trace_array *tr = filp->private_data;
 	unsigned long val;
 	int old_order;
@@ -9145,11 +9146,12 @@ buffer_subbuf_size_write(struct file *filp, const char __user *ubuf,
 
 	val *= 1024; /* value passed in is in KB */
 
-	pages = DIV_ROUND_UP(val, PAGE_SIZE);
+	pages = DIV_ROUND_UP(val, __PAGE_SIZE);
+	pages *= nr_subpages;
 	order = fls(pages - 1);
 
 	/* limit between 1 and 128 system pages */
-	if (order < 0 || order > 7)
+	if (order < 0 || order > 7 + get_order(nr_subpages))
 		return -EINVAL;
 
 	/* Do not allow tracing while changing the order of the ring buffer */
@@ -9223,7 +9225,7 @@ allocate_trace_buffer(struct trace_array *tr, struct array_buffer *buf, int size
 	buf->tr = tr;
 
 	if (tr->range_addr_start && tr->range_addr_size) {
-		buf->buffer = ring_buffer_alloc_range(size, rb_flags, 0,
+		buf->buffer = ring_buffer_alloc_range(size, rb_flags, get_order(__PAGE_SIZE),
 						      tr->range_addr_start,
 						      tr->range_addr_size);
 
@@ -9995,7 +9997,11 @@ static struct notifier_block trace_die_notifier = {
 static int trace_die_panic_handler(struct notifier_block *self,
 				unsigned long ev, void *unused)
 {
-	if (!ftrace_dump_on_oops_enabled())
+	bool ftrace_check = false;
+
+	trace_android_vh_ftrace_oops_enter(&ftrace_check);
+
+	if (!ftrace_dump_on_oops_enabled() || ftrace_check)
 		return NOTIFY_DONE;
 
 	/* The die notifier requires DIE_OOPS to trigger */
@@ -10004,6 +10010,7 @@ static int trace_die_panic_handler(struct notifier_block *self,
 
 	ftrace_dump(DUMP_PARAM);
 
+	trace_android_vh_ftrace_oops_exit(&ftrace_check);
 	return NOTIFY_DONE;
 }
 
@@ -10023,6 +10030,8 @@ static int trace_die_panic_handler(struct notifier_block *self,
 void
 trace_printk_seq(struct trace_seq *s)
 {
+	bool dump_printk = true;
+
 	/* Probably should print a warning here. */
 	if (s->seq.len >= TRACE_MAX_PRINT)
 		s->seq.len = TRACE_MAX_PRINT;
@@ -10038,7 +10047,9 @@ trace_printk_seq(struct trace_seq *s)
 	/* should be zero ended, but we are paranoid. */
 	s->buffer[s->seq.len] = 0;
 
-	printk(KERN_TRACE "%s", s->buffer);
+	trace_android_vh_ftrace_dump_buffer(s, &dump_printk);
+	if (dump_printk)
+		printk(KERN_TRACE "%s", s->buffer);
 
 	trace_seq_init(s);
 }
@@ -10080,6 +10091,9 @@ static void ftrace_dump_one(struct trace_array *tr, enum ftrace_dump_mode dump_m
 	unsigned int old_userobj;
 	unsigned long flags;
 	int cnt = 0, cpu;
+	bool ftrace_check = true;
+	bool ftrace_size_check = false;
+	unsigned long size;
 
 	/*
 	 * Always turn off tracing when we dump.
@@ -10098,12 +10112,17 @@ static void ftrace_dump_one(struct trace_array *tr, enum ftrace_dump_mode dump_m
 
 	for_each_tracing_cpu(cpu) {
 		atomic_inc(&per_cpu_ptr(iter.array_buffer->data, cpu)->disabled);
+		size = ring_buffer_size(iter.array_buffer->buffer, cpu);
+		trace_android_vh_ftrace_size_check(size, &ftrace_size_check);
 	}
 
 	old_userobj = tr->trace_flags & TRACE_ITER_SYM_USEROBJ;
 
 	/* don't look at user memory in panic mode */
 	tr->trace_flags &= ~TRACE_ITER_SYM_USEROBJ;
+
+	if (ftrace_size_check)
+		goto out_enable;
 
 	if (dump_mode == DUMP_ORIG)
 		iter.cpu_file = raw_smp_processor_id();
@@ -10122,6 +10141,14 @@ static void ftrace_dump_one(struct trace_array *tr, enum ftrace_dump_mode dump_m
 	}
 
 	/*
+	 * Ftrace timestmap support two types:
+	 * - ftrace_check = 1, latency format, start with 0 from a specific time.
+	 * - ftrace_check = 0, absolute time format, consistent with kernel time.
+	 * With this vendor hook, we can choose the format from different requirement.
+	 */
+	trace_android_vh_ftrace_format_check(&ftrace_check);
+
+	/*
 	 * We need to stop all tracing on all CPUS to read
 	 * the next buffer. This is a bit expensive, but is
 	 * not done often. We fill all what we can read,
@@ -10129,14 +10156,14 @@ static void ftrace_dump_one(struct trace_array *tr, enum ftrace_dump_mode dump_m
 	 */
 
 	while (!trace_empty(&iter)) {
-
 		if (!cnt)
 			printk(KERN_TRACE "---------------------------------\n");
 
 		cnt++;
 
 		trace_iterator_reset(&iter);
-		iter.iter_flags |= TRACE_FILE_LAT_FMT;
+		if (ftrace_check)
+			iter.iter_flags |= TRACE_FILE_LAT_FMT;
 
 		if (trace_find_next_entry_inc(&iter) != NULL) {
 			int ret;
@@ -10155,6 +10182,7 @@ static void ftrace_dump_one(struct trace_array *tr, enum ftrace_dump_mode dump_m
 	else
 		printk(KERN_TRACE "---------------------------------\n");
 
+out_enable:
 	tr->trace_flags |= old_userobj;
 
 	for_each_tracing_cpu(cpu) {

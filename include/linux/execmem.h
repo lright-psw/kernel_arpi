@@ -126,6 +126,18 @@ void execmem_free(void *ptr);
 
 DEFINE_FREE(execmem, void *, if (_T) execmem_free(_T));
 
+#ifdef CONFIG_MMU
+/**
+ * execmem_vmap - create virtual mapping for EXECMEM_MODULE_DATA memory
+ * @size: size of the virtual mapping in bytes
+ *
+ * Maps virtually contiguous area in the range suitable for EXECMEM_MODULE_DATA.
+ *
+ * Return: the area descriptor on success or %NULL on failure.
+ */
+struct vm_struct *execmem_vmap(size_t size);
+#endif
+
 #if defined(CONFIG_EXECMEM) && !defined(CONFIG_ARCH_WANTS_EXECMEM_LATE)
 void execmem_init(void);
 #else

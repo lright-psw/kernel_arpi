@@ -47,6 +47,9 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/vmalloc.h>
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/mm.h>
+
 #include "internal.h"
 #include "pgalloc-track.h"
 
@@ -661,7 +664,7 @@ int vmap_pages_range_noflush(unsigned long addr, unsigned long end,
  * RETURNS:
  * 0 on success, -errno on failure.
  */
-static int vmap_pages_range(unsigned long addr, unsigned long end,
+int vmap_pages_range(unsigned long addr, unsigned long end,
 		pgprot_t prot, struct page **pages, unsigned int page_shift)
 {
 	int err;
@@ -1004,6 +1007,7 @@ unsigned long vmalloc_nr_pages(void)
 {
 	return atomic_long_read(&nr_vmalloc_pages);
 }
+EXPORT_SYMBOL_GPL(vmalloc_nr_pages);
 
 static struct vmap_area *__find_vmap_area(unsigned long addr, struct rb_root *root)
 {
@@ -1951,6 +1955,7 @@ static inline void setup_vmalloc_vm(struct vm_struct *vm,
 	vm->size = vm->requested_size = va_size(va);
 	vm->caller = caller;
 	va->vm = vm;
+	trace_android_vh_save_vmalloc_stack(flags, vm);
 }
 
 /*
@@ -2028,6 +2033,7 @@ retry:
 		vm->addr = (void *)va->va_start;
 		vm->size = va_size(va);
 		va->vm = vm;
+		trace_android_vh_save_vmalloc_stack(va_flags, vm);
 	}
 
 	vn = addr_to_node(va->va_start);
@@ -3109,7 +3115,7 @@ static void clear_vm_uninitialized_flag(struct vm_struct *vm)
 	vm->flags &= ~VM_UNINITIALIZED;
 }
 
-static struct vm_struct *__get_vm_area_node(unsigned long size,
+struct vm_struct *__get_vm_area_node(unsigned long size,
 		unsigned long align, unsigned long shift, unsigned long flags,
 		unsigned long start, unsigned long end, int node,
 		gfp_t gfp_mask, const void *caller)
@@ -3350,8 +3356,13 @@ void vfree_atomic(const void *addr)
  */
 void vfree(const void *addr)
 {
+	bool bypass = false;
 	struct vm_struct *vm;
 	int i;
+
+	trace_android_rvh_vfree_bypass(addr, &bypass);
+	if (bypass)
+		return;
 
 	if (unlikely(in_interrupt())) {
 		vfree_atomic(addr);
@@ -3917,6 +3928,12 @@ fail:
 void *__vmalloc_node_noprof(unsigned long size, unsigned long align,
 			    gfp_t gfp_mask, int node, const void *caller)
 {
+	void *addr = NULL;
+
+	trace_android_rvh_vmalloc_node_bypass(size, gfp_mask, &addr);
+	if (addr)
+		return addr;
+
 	return __vmalloc_node_range_noprof(size, align, VMALLOC_START, VMALLOC_END,
 				gfp_mask, PAGE_KERNEL, 0, node, caller);
 }
@@ -5055,6 +5072,7 @@ static int vmalloc_info_show(struct seq_file *m, void *p)
 			if (IS_ENABLED(CONFIG_NUMA))
 				show_numa_info(m, v, counters);
 
+			trace_android_vh_show_stack_hash(m, v);
 			seq_putc(m, '\n');
 		}
 		spin_unlock(&vn->busy.lock);

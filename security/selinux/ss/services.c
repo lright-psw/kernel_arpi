@@ -48,6 +48,7 @@
 #include <linux/audit.h>
 #include <linux/vmalloc.h>
 #include <linux/lsm_hooks.h>
+#include <linux/parser.h>
 #include <net/netlabel.h>
 
 #include "flask.h"
@@ -67,6 +68,8 @@
 #include "audit.h"
 #include "policycap_names.h"
 #include "ima.h"
+
+#include <trace/hooks/selinux.h>
 
 struct selinux_policy_convert_data {
 	struct convert_context_args args;
@@ -2134,16 +2137,38 @@ static void security_load_policycaps(struct selinux_policy *policy)
 		WRITE_ONCE(selinux_state.policycap[i],
 			ebitmap_get_bit(&p->policycaps, i));
 
+	WRITE_ONCE(selinux_memfd_class_policycap, ebitmap_get_bit(&p->policycaps,
+								  POLICYDB_CAP_MEMFD_CLASS));
+
+	WRITE_ONCE(selinux_seclabel_wildcard_policycap,
+		   ebitmap_get_bit(&p->policycaps,
+				   POLICYDB_CAP_GENFS_SECLABEL_WILDCARD));
+
 	for (i = 0; i < ARRAY_SIZE(selinux_policycap_names); i++)
 		pr_info("SELinux:  policy capability %s=%d\n",
 			selinux_policycap_names[i],
 			ebitmap_get_bit(&p->policycaps, i));
 
+	pr_info("SELinux: policy capability %s=%d\n",
+		POLICYDB_CAP_MEMFD_CLASS_NAME,
+		ebitmap_get_bit(&p->policycaps, POLICYDB_CAP_MEMFD_CLASS));
+
+	pr_info("SELinux: policy capability %s=%d\n",
+		POLICYDB_CAP_GENFS_SECLABEL_WILDCARD_NAME,
+		ebitmap_get_bit(&p->policycaps,
+				POLICYDB_CAP_GENFS_SECLABEL_WILDCARD));
+
 	ebitmap_for_each_positive_bit(&p->policycaps, node, i) {
-		if (i >= ARRAY_SIZE(selinux_policycap_names))
+		if (i >= ARRAY_SIZE(selinux_policycap_names) &&
+		    i != POLICYDB_CAP_MEMFD_CLASS &&
+		    i != POLICYDB_CAP_GENFS_SECLABEL_WILDCARD)
 			pr_info("SELinux:  unknown policy capability %u\n",
 				i);
 	}
+
+	selinux_state.android_netlink_route = p->android_netlink_route;
+	selinux_state.android_netlink_getneigh = p->android_netlink_getneigh;
+	selinux_nlmsg_init();
 }
 
 static int security_preserve_bools(struct selinux_policy *oldpolicy,
@@ -2236,6 +2261,7 @@ void selinux_policy_commit(struct selinux_load_state *load_state)
 		 */
 		selinux_mark_initialized();
 		selinux_complete_init();
+		trace_android_rvh_selinux_is_initialized(state);
 	}
 
 	/* Free the old policy */
@@ -2847,6 +2873,7 @@ static inline int __security_genfs_sid(struct selinux_policy *policy,
 	struct genfs *genfs;
 	struct ocontext *c;
 	int cmp = 0;
+	bool wildcard;
 
 	while (path[0] == '/' && path[1] == '/')
 		path++;
@@ -2863,11 +2890,20 @@ static inline int __security_genfs_sid(struct selinux_policy *policy,
 	if (!genfs || cmp)
 		return -ENOENT;
 
+	wildcard = ebitmap_get_bit(&policy->policydb.policycaps,
+				   POLICYDB_CAP_GENFS_SECLABEL_WILDCARD);
 	for (c = genfs->head; c; c = c->next) {
-		size_t len = strlen(c->u.name);
-		if ((!c->v.sclass || sclass == c->v.sclass) &&
-		    (strncmp(c->u.name, path, len) == 0))
-			break;
+		if (!c->v.sclass || sclass == c->v.sclass) {
+			if (wildcard) {
+				if (match_wildcard(c->u.name, path))
+					break;
+			} else {
+				size_t len = strlen(c->u.name);
+
+				if ((strncmp(c->u.name, path, len)) == 0)
+					break;
+			}
+		}
 	}
 
 	if (!c)

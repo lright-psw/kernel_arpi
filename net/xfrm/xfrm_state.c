@@ -531,8 +531,7 @@ void xfrm_state_free(struct xfrm_state *x)
 }
 EXPORT_SYMBOL(xfrm_state_free);
 
-static void xfrm_state_delete_tunnel(struct xfrm_state *x);
-static void xfrm_state_gc_destroy(struct xfrm_state *x)
+static void ___xfrm_state_destroy(struct xfrm_state *x)
 {
 	hrtimer_cancel(&x->mtimer);
 	del_timer_sync(&x->rtimer);
@@ -546,7 +545,6 @@ static void xfrm_state_gc_destroy(struct xfrm_state *x)
 	kfree(x->preplay_esn);
 	if (x->type_offload)
 		xfrm_put_type_offload(x->type_offload);
-	xfrm_state_delete_tunnel(x);
 	if (x->type) {
 		x->type->destructor(x);
 		xfrm_put_type(x->type);
@@ -571,7 +569,7 @@ static void xfrm_state_gc_task(struct work_struct *work)
 	synchronize_rcu();
 
 	hlist_for_each_entry_safe(x, tmp, &gc_list, gclist)
-		xfrm_state_gc_destroy(x);
+		___xfrm_state_destroy(x);
 }
 
 static enum hrtimer_restart xfrm_timer_handler(struct hrtimer *me)
@@ -734,17 +732,23 @@ void xfrm_dev_state_free(struct xfrm_state *x)
 }
 #endif
 
-void __xfrm_state_destroy(struct xfrm_state *x)
+void __xfrm_state_destroy(struct xfrm_state *x, bool sync)
 {
 	WARN_ON(x->km.state != XFRM_STATE_DEAD);
 
-	spin_lock_bh(&xfrm_state_gc_lock);
-	hlist_add_head(&x->gclist, &xfrm_state_gc_list);
-	spin_unlock_bh(&xfrm_state_gc_lock);
-	schedule_work(&xfrm_state_gc_work);
+	if (sync) {
+		synchronize_rcu();
+		___xfrm_state_destroy(x);
+	} else {
+		spin_lock_bh(&xfrm_state_gc_lock);
+		hlist_add_head(&x->gclist, &xfrm_state_gc_list);
+		spin_unlock_bh(&xfrm_state_gc_lock);
+		schedule_work(&xfrm_state_gc_work);
+	}
 }
 EXPORT_SYMBOL(__xfrm_state_destroy);
 
+static void xfrm_state_delete_tunnel(struct xfrm_state *x);
 int __xfrm_state_delete(struct xfrm_state *x)
 {
 	struct net *net = xs_net(x);
@@ -855,7 +859,7 @@ xfrm_dev_state_flush_secctx_check(struct net *net, struct net_device *dev, bool 
 }
 #endif
 
-int xfrm_state_flush(struct net *net, u8 proto, bool task_valid)
+int xfrm_state_flush(struct net *net, u8 proto, bool task_valid, bool sync)
 {
 	int i, err = 0, cnt = 0;
 
@@ -1633,26 +1637,6 @@ struct xfrm_state *xfrm_state_lookup_byspi(struct net *net, __be32 spi,
 }
 EXPORT_SYMBOL(xfrm_state_lookup_byspi);
 
-static struct xfrm_state *xfrm_state_lookup_spi_proto(struct net *net, __be32 spi, u8 proto)
-{
-	struct xfrm_state *x;
-	unsigned int i;
-
-	rcu_read_lock();
-	for (i = 0; i <= net->xfrm.state_hmask; i++) {
-		hlist_for_each_entry_rcu(x, &net->xfrm.state_byspi[i], byspi) {
-			if (x->id.spi == spi && x->id.proto == proto) {
-				if (!xfrm_state_hold_rcu(x))
-					continue;
-				rcu_read_unlock();
-				return x;
-			}
-		}
-	}
-	rcu_read_unlock();
-	return NULL;
-}
-
 static void __xfrm_state_insert(struct xfrm_state *x)
 {
 	struct net *net = xs_net(x);
@@ -2056,7 +2040,10 @@ EXPORT_SYMBOL(xfrm_migrate_state_find);
 
 struct xfrm_state *xfrm_state_migrate(struct xfrm_state *x,
 				      struct xfrm_migrate *m,
-				      struct xfrm_encap_tmpl *encap)
+				      struct xfrm_encap_tmpl *encap,
+				      struct net *net,
+				      struct xfrm_user_offload *xuo,
+				      struct netlink_ext_ack *extack)
 {
 	struct xfrm_state *xc;
 
@@ -2071,6 +2058,10 @@ struct xfrm_state *xfrm_state_migrate(struct xfrm_state *x,
 
 	memcpy(&xc->id.daddr, &m->new_daddr, sizeof(xc->id.daddr));
 	memcpy(&xc->props.saddr, &m->new_saddr, sizeof(xc->props.saddr));
+
+	/* configure the hardware if offload is requested */
+	if (xuo && xfrm_dev_state_add(net, xc, xuo, extack))
+		goto error;
 
 	/* add state */
 	if (xfrm_addr_equal(&x->id.daddr, &m->new_daddr, m->new_family)) {
@@ -2485,8 +2476,10 @@ int xfrm_alloc_spi(struct xfrm_state *x, u32 low, u32 high,
 	unsigned int h;
 	struct xfrm_state *x0;
 	int err = -ENOENT;
-	u32 range = high - low + 1;
+	__be32 minspi = htonl(low);
+	__be32 maxspi = htonl(high);
 	__be32 newspi = 0;
+	u32 mark = x->mark.v & x->mark.m;
 
 	spin_lock_bh(&x->lock);
 	if (x->km.state == XFRM_STATE_DEAD) {
@@ -2500,37 +2493,38 @@ int xfrm_alloc_spi(struct xfrm_state *x, u32 low, u32 high,
 
 	err = -ENOENT;
 
-	for (h = 0; h < range; h++) {
-		u32 spi = (low == high) ? low : get_random_u32_inclusive(low, high);
-		if (spi == 0)
-			goto next;
-		newspi = htonl(spi);
-
-		spin_lock_bh(&net->xfrm.xfrm_state_lock);
-		x0 = xfrm_state_lookup_spi_proto(net, newspi, x->id.proto);
-		if (!x0) {
-			x->id.spi = newspi;
-			h = xfrm_spi_hash(net, &x->id.daddr, newspi, x->id.proto, x->props.family);
-			XFRM_STATE_INSERT(byspi, &x->byspi, net->xfrm.state_byspi + h, x->xso.type);
-			spin_unlock_bh(&net->xfrm.xfrm_state_lock);
-			err = 0;
+	if (minspi == maxspi) {
+		x0 = xfrm_state_lookup(net, mark, &x->id.daddr, minspi, x->id.proto, x->props.family);
+		if (x0) {
+			NL_SET_ERR_MSG(extack, "Requested SPI is already in use");
+			xfrm_state_put(x0);
 			goto unlock;
 		}
-		xfrm_state_put(x0);
+		newspi = minspi;
+	} else {
+		u32 spi = 0;
+		for (h = 0; h < high-low+1; h++) {
+			spi = get_random_u32_inclusive(low, high);
+			x0 = xfrm_state_lookup(net, mark, &x->id.daddr, htonl(spi), x->id.proto, x->props.family);
+			if (x0 == NULL) {
+				newspi = htonl(spi);
+				break;
+			}
+			xfrm_state_put(x0);
+		}
+	}
+	if (newspi) {
+		spin_lock_bh(&net->xfrm.xfrm_state_lock);
+		x->id.spi = newspi;
+		h = xfrm_spi_hash(net, &x->id.daddr, x->id.spi, x->id.proto, x->props.family);
+		XFRM_STATE_INSERT(byspi, &x->byspi, net->xfrm.state_byspi + h,
+				  x->xso.type);
 		spin_unlock_bh(&net->xfrm.xfrm_state_lock);
 
-next:
-		if (signal_pending(current)) {
-			err = -ERESTARTSYS;
-			goto unlock;
-		}
-
-		if (low == high)
-			break;
-	}
-
-	if (err)
+		err = 0;
+	} else {
 		NL_SET_ERR_MSG(extack, "No SPI available in the requested range");
+	}
 
 unlock:
 	spin_unlock_bh(&x->lock);
@@ -2883,7 +2877,8 @@ int xfrm_user_policy(struct sock *sk, int optname, sockptr_t optval, int optlen)
 	if (IS_ERR(data))
 		return PTR_ERR(data);
 
-	if (in_compat_syscall()) {
+	/* Use the 64-bit / untranslated format on Android, even for compat */
+	if (!IS_ENABLED(CONFIG_GKI_NET_XFRM_HACKS) && in_compat_syscall()) {
 		struct xfrm_translator *xtr = xfrm_get_translator();
 
 		if (!xtr) {
@@ -3215,7 +3210,7 @@ void xfrm_state_fini(struct net *net)
 	unsigned int sz;
 
 	flush_work(&net->xfrm.state_hash_work);
-	xfrm_state_flush(net, 0, false);
+	xfrm_state_flush(net, 0, false, true);
 	flush_work(&xfrm_state_gc_work);
 
 	WARN_ON(!list_empty(&net->xfrm.state_all));

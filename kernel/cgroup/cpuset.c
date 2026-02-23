@@ -41,6 +41,9 @@
 #include <linux/sched/isolation.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
+#include <trace/hooks/sched.h>
+
+#include <trace/hooks/cgroup.h>
 
 DEFINE_STATIC_KEY_FALSE(cpusets_pre_enable_key);
 DEFINE_STATIC_KEY_FALSE(cpusets_enabled_key);
@@ -1095,6 +1098,19 @@ void rebuild_sched_domains(void)
 	rebuild_sched_domains_cpuslocked();
 	cpus_read_unlock();
 }
+EXPORT_SYMBOL_GPL(rebuild_sched_domains);
+
+static int update_cpus_allowed(struct cpuset *cs, struct task_struct *p,
+				const struct cpumask *new_mask)
+{
+	int ret = -EINVAL;
+
+	trace_android_rvh_update_cpus_allowed(p, cs, new_mask, &ret);
+	if (!ret)
+		return ret;
+
+	return set_cpus_allowed_ptr(p, new_mask);
+}
 
 /**
  * cpuset_update_tasks_cpumask - Update the cpumasks of tasks in the cpuset.
@@ -1129,7 +1145,7 @@ void cpuset_update_tasks_cpumask(struct cpuset *cs, struct cpumask *new_cpus)
 		} else {
 			cpumask_and(new_cpus, possible_mask, cs->effective_cpus);
 		}
-		set_cpus_allowed_ptr(task, new_cpus);
+		update_cpus_allowed(cs, task, new_cpus);
 	}
 	css_task_iter_end(&it);
 }
@@ -3061,7 +3077,7 @@ static void cpuset_attach_task(struct cpuset *cs, struct task_struct *task)
 	 * can_attach beforehand should guarantee that this doesn't
 	 * fail.  TODO: have a better way to handle failure here
 	 */
-	WARN_ON_ONCE(set_cpus_allowed_ptr(task, cpus_attach));
+	WARN_ON_ONCE(update_cpus_allowed(cs, task, cpus_attach));
 
 	cpuset_change_task_nodemask(task, &cpuset_attach_nodemask_to);
 	cpuset1_update_task_spread_flags(cs, task);
@@ -3628,18 +3644,18 @@ static void cpuset_cancel_fork(struct task_struct *task, struct css_set *cset)
 static void cpuset_fork(struct task_struct *task)
 {
 	struct cpuset *cs;
-	bool same_cs;
+	bool same_cs, inherit_cpus = false;
 
 	rcu_read_lock();
 	cs = task_cs(task);
 	same_cs = (cs == task_cs(current));
 	rcu_read_unlock();
-
 	if (same_cs) {
 		if (cs == &top_cpuset)
 			return;
-
-		set_cpus_allowed_ptr(task, current->cpus_ptr);
+		trace_android_rvh_cpuset_fork(task, &inherit_cpus);
+		if (!inherit_cpus)
+			set_cpus_allowed_ptr(task, current->cpus_ptr);
 		task->mems_allowed = current->mems_allowed;
 		return;
 	}
@@ -4037,6 +4053,7 @@ void cpuset_cpus_allowed(struct task_struct *tsk, struct cpumask *pmask)
 	rcu_read_unlock();
 	spin_unlock_irqrestore(&callback_lock, flags);
 }
+EXPORT_SYMBOL_GPL(cpuset_cpus_allowed);
 
 /**
  * cpuset_cpus_allowed_fallback - final fallback before complete catastrophe.

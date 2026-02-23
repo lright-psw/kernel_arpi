@@ -851,6 +851,7 @@ int f2fs_recover_fsync_data(struct f2fs_sb_info *sbi, bool check_only)
 {
 	struct list_head inode_list, tmp_inode_list;
 	struct list_head dir_list;
+	struct f2fs_lock_context lc;
 	int err;
 	int ret = 0;
 	unsigned long s_flags = sbi->sb->s_flags;
@@ -865,7 +866,7 @@ int f2fs_recover_fsync_data(struct f2fs_sb_info *sbi, bool check_only)
 	INIT_LIST_HEAD(&dir_list);
 
 	/* prevent checkpoint */
-	f2fs_down_write(&sbi->cp_global_sem);
+	f2fs_down_write_trace(&sbi->cp_global_sem, &lc);
 
 	/* step #1: find fsynced inode numbers */
 	err = find_fsync_dnodes(sbi, &inode_list, check_only, &new_inode);
@@ -903,20 +904,13 @@ skip:
 	 * and the f2fs is not read only, check and fix zoned block devices'
 	 * write pointer consistency.
 	 */
-	if (f2fs_sb_has_blkzoned(sbi) && !f2fs_readonly(sbi->sb)) {
-		int err2 = f2fs_fix_curseg_write_pointer(sbi);
-
-		if (!err2)
-			err2 = f2fs_check_write_pointer(sbi);
-		if (err2)
-			err = err2;
-		ret = err;
-	}
+	if (!err)
+		err = f2fs_check_and_fix_write_pointer(sbi);
 
 	if (!err)
 		clear_sbi_flag(sbi, SBI_POR_DOING);
 
-	f2fs_up_write(&sbi->cp_global_sem);
+	f2fs_up_write_trace(&sbi->cp_global_sem, &lc);
 
 	/* let's drop all the directory inodes for clean checkpoint */
 	destroy_fsync_dnodes(&dir_list, err);

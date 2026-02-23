@@ -28,6 +28,10 @@
 #include <asm/sysreg.h>
 #include <asm/system_misc.h>
 
+#include <trace/hooks/traps.h>
+#include <trace/hooks/gic.h>
+#include <trace/hooks/dtask.h>
+
 /*
  * Handle IRQ/context state management when entering from kernel mode.
  * Before this function is called it is not safe to call regular kernel code,
@@ -129,11 +133,16 @@ static __always_inline void __exit_to_user_mode(void)
 
 static void do_notify_resume(struct pt_regs *regs, unsigned long thread_flags)
 {
+	int thread_lazy_resched_flag = 0;
+
+	trace_android_vh_restore_curr_resched(&thread_flags, &thread_lazy_resched_flag);
 	do {
 		local_irq_enable();
 
-		if (thread_flags & _TIF_NEED_RESCHED)
+		if (thread_flags & _TIF_NEED_RESCHED || thread_lazy_resched_flag) {
+			thread_lazy_resched_flag = 0;
 			schedule();
+		}
 
 		if (thread_flags & _TIF_UPROBE)
 			uprobe_notify_resume(regs);
@@ -155,17 +164,21 @@ static void do_notify_resume(struct pt_regs *regs, unsigned long thread_flags)
 
 		local_irq_disable();
 		thread_flags = read_thread_flags();
-	} while (thread_flags & _TIF_WORK_MASK);
+		trace_android_vh_restore_curr_resched(&thread_flags, &thread_lazy_resched_flag);
+	} while (thread_flags & _TIF_WORK_MASK || thread_lazy_resched_flag);
 }
 
 static __always_inline void exit_to_user_mode_prepare(struct pt_regs *regs)
 {
 	unsigned long flags;
 
+	int thread_lazy_resched_flag = 0;
+
 	local_irq_disable();
 
 	flags = read_thread_flags();
-	if (unlikely(flags & _TIF_WORK_MASK))
+	trace_android_vh_restore_curr_resched(&flags, &thread_lazy_resched_flag);
+	if (unlikely(flags & _TIF_WORK_MASK) || thread_lazy_resched_flag)
 		do_notify_resume(regs, flags);
 
 	local_daif_mask();
@@ -328,6 +341,7 @@ static void noinstr __panic_unhandled(struct pt_regs *regs, const char *vector,
 		vector, smp_processor_id(), esr,
 		esr_get_class_string(esr));
 
+	trace_android_rvh_panic_unhandled(regs, vector, esr);
 	__show_regs(regs);
 	panic("Unhandled exception");
 }
@@ -581,6 +595,7 @@ asmlinkage void noinstr el1h_64_irq_handler(struct pt_regs *regs)
 
 asmlinkage void noinstr el1h_64_fiq_handler(struct pt_regs *regs)
 {
+	trace_android_rvh_fiq_dump(regs);
 	el1_interrupt(regs, handle_arch_fiq);
 }
 
@@ -838,6 +853,7 @@ static void noinstr __el0_fiq_handler_common(struct pt_regs *regs)
 
 asmlinkage void noinstr el0t_64_fiq_handler(struct pt_regs *regs)
 {
+	trace_android_rvh_fiq_dump(regs);
 	__el0_fiq_handler_common(regs);
 }
 
@@ -949,6 +965,7 @@ asmlinkage void noinstr __noreturn handle_bad_stack(struct pt_regs *regs)
 	unsigned long far = read_sysreg(far_el1);
 
 	arm64_enter_nmi(regs);
+	trace_android_rvh_handle_bad_stack(regs, esr, far);
 	panic_bad_stack(regs, esr, far);
 }
 #endif /* CONFIG_VMAP_STACK */

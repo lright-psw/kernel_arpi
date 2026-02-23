@@ -13,6 +13,8 @@
 
 struct elevator_type;
 
+#define	BLK_MIN_SEGMENT_SIZE	4096
+
 /* Max future timer expiry for timeouts */
 #define BLK_MAX_TIMEOUT		(5 * HZ)
 
@@ -357,8 +359,12 @@ struct bio *bio_split_zone_append(struct bio *bio,
 static inline bool bio_may_need_split(struct bio *bio,
 		const struct queue_limits *lim)
 {
-	return lim->chunk_sectors || bio->bi_vcnt != 1 ||
-		bio->bi_io_vec->bv_len + bio->bi_io_vec->bv_offset > PAGE_SIZE;
+	if (lim->chunk_sectors)
+		return true;
+	if (bio->bi_vcnt != 1)
+		return true;
+	return bio->bi_io_vec->bv_len + bio->bi_io_vec->bv_offset >
+		lim->min_segment_size;
 }
 
 /**
@@ -469,40 +475,18 @@ static inline bool bio_zone_write_plugging(struct bio *bio)
 {
 	return bio_flagged(bio, BIO_ZONE_WRITE_PLUGGING);
 }
+static inline bool blk_req_bio_is_zone_append(struct request *rq,
+					      struct bio *bio)
+{
+	return req_op(rq) == REQ_OP_ZONE_APPEND ||
+	       bio_flagged(bio, BIO_EMULATES_ZONE_APPEND);
+}
 void blk_zone_write_plug_bio_merged(struct bio *bio);
 void blk_zone_write_plug_init_request(struct request *rq);
-static inline void blk_zone_update_request_bio(struct request *rq,
-					       struct bio *bio)
-{
-	/*
-	 * For zone append requests, the request sector indicates the location
-	 * at which the BIO data was written. Return this value to the BIO
-	 * issuer through the BIO iter sector.
-	 * For plugged zone writes, which include emulated zone append, we need
-	 * the original BIO sector so that blk_zone_write_plug_bio_endio() can
-	 * lookup the zone write plug.
-	 */
-	if (req_op(rq) == REQ_OP_ZONE_APPEND ||
-	    bio_flagged(bio, BIO_EMULATES_ZONE_APPEND))
-		bio->bi_iter.bi_sector = rq->__sector;
-}
-void blk_zone_mgmt_bio_endio(struct bio *bio);
+void blk_zone_append_update_request_bio(struct request *rq, struct bio *bio);
 void blk_zone_write_plug_bio_endio(struct bio *bio);
 static inline void blk_zone_bio_endio(struct bio *bio)
 {
-	/*
-	 * Zone management BIOs may impact zone write plugs (e.g. a zone reset
-	 * changes a zone write plug zone write pointer offset), but these
-	 * operation do not go through zone write plugging as they may operate
-	 * on zones that do not have a zone write
-	 * plug. blk_zone_mgmt_bio_endio() handles the potential changes to zone
-	 * write plugs that are present.
-	 */
-	if (op_is_zone_mgmt(bio_op(bio))) {
-		blk_zone_mgmt_bio_endio(bio);
-		return;
-	}
-
 	/*
 	 * For write BIOs to zoned devices, signal the completion of the BIO so
 	 * that the next write BIO can be submitted by zone write plugging.
@@ -532,14 +516,19 @@ static inline bool bio_zone_write_plugging(struct bio *bio)
 {
 	return false;
 }
+static inline bool blk_req_bio_is_zone_append(struct request *req,
+					      struct bio *bio)
+{
+	return false;
+}
 static inline void blk_zone_write_plug_bio_merged(struct bio *bio)
 {
 }
 static inline void blk_zone_write_plug_init_request(struct request *rq)
 {
 }
-static inline void blk_zone_update_request_bio(struct request *rq,
-					       struct bio *bio)
+static inline void blk_zone_append_update_request_bio(struct request *rq,
+						      struct bio *bio)
 {
 }
 static inline void blk_zone_bio_endio(struct bio *bio)
@@ -581,14 +570,6 @@ void bdev_set_nr_sectors(struct block_device *bdev, sector_t sectors);
 
 struct gendisk *__alloc_disk_node(struct request_queue *q, int node_id,
 		struct lock_class_key *lkclass);
-
-int bio_add_hw_page(struct request_queue *q, struct bio *bio,
-		struct page *page, unsigned int len, unsigned int offset,
-		unsigned int max_sectors, bool *same_page);
-
-int bio_add_hw_folio(struct request_queue *q, struct bio *bio,
-		struct folio *folio, size_t len, size_t offset,
-		unsigned int max_sectors, bool *same_page);
 
 /*
  * Clean up a page appropriately, where the page may be pinned, may have a
@@ -746,22 +727,29 @@ void blk_integrity_verify(struct bio *bio);
 void blk_integrity_prepare(struct request *rq);
 void blk_integrity_complete(struct request *rq, unsigned int nr_bytes);
 
-static inline void blk_freeze_acquire_lock(struct request_queue *q, bool
-		disk_dead, bool queue_dying)
+#ifdef CONFIG_LOCKDEP
+static inline void blk_freeze_acquire_lock(struct request_queue *q)
 {
-	if (!disk_dead)
+	if (!q->mq_freeze_disk_dead)
 		rwsem_acquire(&q->io_lockdep_map, 0, 1, _RET_IP_);
-	if (!queue_dying)
+	if (!q->mq_freeze_queue_dying)
 		rwsem_acquire(&q->q_lockdep_map, 0, 1, _RET_IP_);
 }
 
-static inline void blk_unfreeze_release_lock(struct request_queue *q, bool
-		disk_dead, bool queue_dying)
+static inline void blk_unfreeze_release_lock(struct request_queue *q)
 {
-	if (!queue_dying)
+	if (!q->mq_freeze_queue_dying)
 		rwsem_release(&q->q_lockdep_map, _RET_IP_);
-	if (!disk_dead)
+	if (!q->mq_freeze_disk_dead)
 		rwsem_release(&q->io_lockdep_map, _RET_IP_);
 }
+#else
+static inline void blk_freeze_acquire_lock(struct request_queue *q)
+{
+}
+static inline void blk_unfreeze_release_lock(struct request_queue *q)
+{
+}
+#endif
 
 #endif /* BLK_INTERNAL_H */

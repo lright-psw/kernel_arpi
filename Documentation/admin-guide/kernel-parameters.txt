@@ -449,6 +449,9 @@
 	arm64.nomops	[ARM64] Unconditionally disable Memory Copy and Memory
 			Set instructions support
 
+	arm64.nompam	[ARM64] Unconditionally disable Memory Partitioning And
+			Monitoring support
+
 	arm64.nomte	[ARM64] Unconditionally disable Memory Tagging Extension
 			support
 
@@ -1133,6 +1136,10 @@
 			can be useful when debugging issues that require an SLB
 			miss to occur.
 
+	disable_dma32=	[KNL]
+			Dynamically disable ZONE_DMA32 on kernels compiled with
+			CONFIG_ZONE_DMA32=y.
+
 	disable=	[IPV6]
 			See Documentation/networking/ipv6.rst.
 
@@ -1534,6 +1541,10 @@
 			Format: { "fix" }
 			Permit 'security.evm' to be updated regardless of
 			current integrity status.
+	export_pmu_events
+			[KNL,ARM64] Sets the PMU export bit (PMCR_EL0.X), which enables
+			the exporting of events over an IMPLEMENTATION DEFINED PMU event
+			export bus to another device.
 
 	early_page_ext [KNL,EARLY] Enforces page_ext initialization to earlier
 			stages so cover more early boot allocations.
@@ -1907,6 +1918,10 @@
 	hvc_iucv_allow=	[S390]	Comma-separated list of z/VM user IDs.
 				If specified, z/VM IUCV HVC accepts connections
 				from listed z/VM user IDs only.
+
+	hvc_dcc.enable=	[ARM,ARM64]	Enable DCC driver at runtime. For GKI,
+				disabled at runtime by default to prevent
+				crashes in devices which do not support DCC.
 
 	hv_nopvspin	[X86,HYPER_V,EARLY]
 			Disables the paravirt spinlock optimizations
@@ -2664,7 +2679,7 @@
 			CONFIG_KUNIT to be set to be fully enabled. The
 			default value can be overridden via
 			KUNIT_DEFAULT_ENABLED.
-			Default is 1 (enabled)
+			Default is 0 (disabled)
 
 	kvm.ignore_msrs=[KVM] Ignore guest accesses to unhandled MSRs.
 			Default is 0 (don't ignore, but inject #GP)
@@ -2748,6 +2763,11 @@
 			(enabled). Disable by KVM if hardware lacks support
 			for NPT.
 
+	kvm-arm.hyp_lm_size_mb=
+			[KVM,ARM,EARLY] Maximum amount of contiguous memory mappable in
+			the pKVM hypervisor linear map, in MB. Any attempt to map more
+			memory than this into pKVM stage-1 at run-time may be fatal.
+
 	kvm-arm.mode=
 			[KVM,ARM,EARLY] Select one of KVM/arm64's modes of
 			operation.
@@ -2758,7 +2778,9 @@
 			      protected guests.
 
 			protected: nVHE-based mode with support for guests whose
-				   state is kept private from the host.
+				   state is kept private from the host. See
+				   Documentation/virt/kvm/arm/pkvm.rst for more
+				   information about this mode of operation.
 
 			nested: VHE-based mode with support for nested
 				virtualization. Requires at least ARMv8.3
@@ -2768,6 +2790,17 @@
 			mode to "protected" will disable kexec and hibernation
 			for the host. "nested" is experimental and should be
 			used with extreme caution.
+
+	kvm-arm.protected_modules=
+			[KVM,ARM] List of pKVM modules to load before the host
+			is deprevileged.
+
+			This option only applies when booting with
+			kvm-arm.mode=protected.
+
+	kvm-arm.protected_prefault=
+			[KVM,ARM] Minimum order for each protected VM fault.
+			This range from 0 (default) to 9.
 
 	kvm-arm.vgic_v3_group0_trap=
 			[KVM,ARM,EARLY] Trap guest accesses to GICv3 group-0
@@ -4099,6 +4132,17 @@
 			nosmt=force: Force disable SMT, cannot be undone
 				     via the sysfs control file.
 
+
+	nosocid		[ARM, ARM64] Disable SMCCC SoC ID driver
+			Disables initialization of the ARM SMCCC SoC ID driver
+			(CONFIG_ARM_SMCCC_SOC_ID) at boot. When specified, the
+			driver does not register the SoC device and related sysfs
+			entries under /sys/bus/soc/devices/soc0/*.
+			Useful for images that include the driver in a generic
+			build (e.g., GKI) but wish to suppress SoC ID exposure
+			at runtime without recompiling.
+			Format: "nosocid" (no value).
+
 	nosoftlockup	[KNL] Disable the soft-lockup detector.
 
 	nospec_store_bypass_disable
@@ -4727,6 +4771,11 @@
 
 	pcmv=		[HW,PCMCIA] BadgePAD 4
 
+	pcp_thp_order=	[MM]
+			Specify the order of the pcp used by THP.
+			The specified value must be no greater than HPAGE_PMD_ORDER
+			(default) and greater than 3 (PAGE_ALLOC_COSTLY_ORDER).
+
 	pd_ignore_unused
 			[PM]
 			Keep all power-domains already enabled by bootloader on,
@@ -4859,6 +4908,14 @@
 			in order to provide more debug information.
 			Format: <bool>
 			default: 0 (auto_verbose is enabled)
+
+	printk.debug_non_panic_cpus=
+			Allows storing messages from non-panic CPUs into
+			the printk log buffer during panic(). They are
+			flushed to consoles by the panic-CPU on
+			a best-effort basis.
+			Format: <bool> (1/Y/y=enable, 0/N/n=disable)
+			Default: disabled
 
 	printk.devkmsg={on,off,ratelimit}
 			Control writing to /dev/kmsg.
@@ -5523,6 +5580,21 @@
 	rcutorture.verbose= [KNL]
 			Enable additional printk() statements.
 
+	rcupdate.rcu_boot_end_delay= [KNL]
+			Minimum time in milliseconds from the start of boot
+			that must elapse before the boot sequence can be marked
+			complete from RCU's perspective, after which RCU's
+			behavior becomes more relaxed. The default value is also
+			configurable via CONFIG_RCU_BOOT_END_DELAY.
+			Userspace can also mark the boot as completed
+			sooner by writing the time in milliseconds, say once
+			userspace considers the system as booted, to:
+			/sys/module/rcupdate/parameters/rcu_boot_end_delay
+			Or even just writing a value of 0 to this sysfs node.
+			The sysfs node can also be used to extend the delay
+			to be larger than the default, assuming the marking
+			of boot complete has not yet occurred.
+
 	rcupdate.rcu_cpu_stall_ftrace_dump= [KNL]
 			Dump ftrace buffer after reporting RCU CPU
 			stall warning.
@@ -5967,6 +6039,11 @@
 
 	sa1100ir	[NET]
 			See drivers/net/irda/sa1100_ir.c.
+
+	sched_proxy_exec= [KNL]
+			Enables or disables "proxy execution" style
+			solution to mutex-based priority inversion.
+			Format: <bool>
 
 	sched_verbose	[KNL,EARLY] Enables verbose scheduler debug messages.
 

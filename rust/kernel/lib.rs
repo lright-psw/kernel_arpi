@@ -13,6 +13,7 @@
 
 #![no_std]
 #![feature(arbitrary_self_types)]
+#![feature(asm_goto)]
 #![feature(coerce_unsized)]
 #![feature(dispatch_from_dyn)]
 #![feature(inline_const)]
@@ -31,24 +32,35 @@ extern crate self as kernel;
 pub use ffi;
 
 pub mod alloc;
+pub mod bitmap;
 #[cfg(CONFIG_BLOCK)]
 pub mod block;
 mod build_assert;
+pub mod cred;
 pub mod device;
 pub mod error;
 #[cfg(CONFIG_RUST_FW_LOADER_ABSTRACTIONS)]
 pub mod firmware;
+pub mod fs;
+pub mod id_pool;
 pub mod init;
 pub mod ioctl;
+pub mod jump_label;
 #[cfg(CONFIG_KUNIT)]
 pub mod kunit;
 pub mod list;
+pub mod miscdevice;
+pub mod mm;
 #[cfg(CONFIG_NET)]
 pub mod net;
 pub mod page;
+pub mod page_size_compat;
+pub mod pid_namespace;
 pub mod prelude;
 pub mod print;
 pub mod rbtree;
+pub mod security;
+pub mod seq_file;
 pub mod sizes;
 mod static_assert;
 #[doc(hidden)]
@@ -57,6 +69,7 @@ pub mod str;
 pub mod sync;
 pub mod task;
 pub mod time;
+pub mod tracepoint;
 pub mod types;
 pub mod uaccess;
 pub mod workqueue;
@@ -149,4 +162,39 @@ macro_rules! container_of {
         let offset: usize = ::core::mem::offset_of!($type, $($f)*);
         ptr.sub(offset) as *const $type
     }}
+}
+
+/// Helper for `.rs.S` files.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! concat_literals {
+    ($( $asm:literal )* ) => {
+        ::core::concat!($($asm),*)
+    };
+}
+
+/// Wrapper around `asm!` configured for use in the kernel.
+///
+/// Uses a semicolon to avoid parsing ambiguities, even though this does not match native `asm!`
+/// syntax.
+// For x86, `asm!` uses intel syntax by default, but we want to use at&t syntax in the kernel.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[macro_export]
+macro_rules! asm {
+    ($($asm:expr),* ; $($rest:tt)*) => {
+        ::core::arch::asm!( $($asm)*, options(att_syntax), $($rest)* )
+    };
+}
+
+/// Wrapper around `asm!` configured for use in the kernel.
+///
+/// Uses a semicolon to avoid parsing ambiguities, even though this does not match native `asm!`
+/// syntax.
+// For non-x86 arches we just pass through to `asm!`.
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[macro_export]
+macro_rules! asm {
+    ($($asm:expr),* ; $($rest:tt)*) => {
+        ::core::arch::asm!( $($asm)*, $($rest)* )
+    };
 }

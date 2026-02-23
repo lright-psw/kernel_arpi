@@ -438,10 +438,16 @@ config GDB_SCRIPTS
 
 endif # DEBUG_INFO
 
+config FORCE_FRAME_WARN_TO_2K
+	bool "Force FRAME_WARN to 2048 for 32-bit allmod/allyes builds"
+	default n
+	depends on !64BIT
+
 config FRAME_WARN
 	int "Warn for stack frames larger than"
 	range 0 8192
 	default 0 if KMSAN
+	default 2048 if FORCE_FRAME_WARN_TO_2K
 	default 2048 if GCC_PLUGIN_LATENT_ENTROPY
 	default 2048 if PARISC
 	default 1536 if (!64BIT && XTENSA)
@@ -993,6 +999,7 @@ config CODE_TAGGING
 config MEM_ALLOC_PROFILING
 	bool "Enable memory allocation profiling"
 	default n
+	depends on MMU
 	depends on PROC_FS
 	depends on !DEBUG_FORCE_WEAK_PER_CPU
 	select CODE_TAGGING
@@ -1259,6 +1266,17 @@ config BOOTPARAM_HUNG_TASK_PANIC
 
 	  Say N if unsure.
 
+config DETECT_HUNG_TASK_BLOCKER
+	bool "Dump Hung Tasks Blocker"
+	depends on DETECT_HUNG_TASK
+	depends on !PREEMPT_RT
+	default n
+	help
+	  Say Y here to show the blocker task's stacktrace who acquires
+	  the mutex lock which "hung tasks" are waiting.
+	  This will add overhead a bit but shows suspicious tasks and
+	  call trace if it comes from waiting a mutex.
+
 config WQ_WATCHDOG
 	bool "Detect Workqueue Stalls"
 	depends on DEBUG_KERNEL
@@ -1308,6 +1326,18 @@ config SCHED_DEBUG
 	  If you say Y here, the /sys/kernel/debug/sched file will be provided
 	  that can help debug the scheduler. The runtime overhead of this
 	  option is minimal.
+
+config SCHED_RT_INVARIANT_TEST
+	bool "RT invariant scheduling tester"
+	depends on DEBUG_KERNEL
+	help
+	  This option provides a kernel module that runs tests to make
+	  sure the RT invariant holds (top N priority tasks run on N
+	  available cpus).
+
+	  Say Y here if you want kernel RT scheduling tests
+	  to be built into the kernel.
+	  Say N if you are unsure.
 
 config SCHED_INFO
 	bool
@@ -3080,6 +3110,21 @@ config RUST_KERNEL_DOCTESTS
 	  please refer to the KUnit documentation in Documentation/dev-tools/kunit/.
 
 	  If unsure, say N.
+
+config RUST_INLINE_HELPERS
+    bool "Inline C helpers into Rust crates (EXPERIMENTAL)"
+    depends on RUST && RUSTC_CLANG_LLVM_COMPATIBLE
+    depends on EXPERT
+    help
+        Links C helpers into Rust crates through LLVM IR.
+
+        If this option is enabled, instead of generating object files directly,
+        rustc is asked to produce LLVM IR, which is then linked together with
+        the LLVM IR of C helpers, before object file is generated.
+
+        This requires a matching LLVM version for Clang and rustc.
+
+        If unsure, say N.
 
 endmenu # "Rust"
 

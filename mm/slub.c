@@ -27,7 +27,6 @@
 #include <linux/cpuset.h>
 #include <linux/mempolicy.h>
 #include <linux/ctype.h>
-#include <linux/stackdepot.h>
 #include <linux/debugobjects.h>
 #include <linux/kallsyms.h>
 #include <linux/kfence.h>
@@ -45,6 +44,8 @@
 
 #include <linux/debugfs.h>
 #include <trace/events/kmem.h>
+#include <trace/hooks/mm.h>
+#include <trace/hooks/fault.h>
 
 #include "internal.h"
 
@@ -315,22 +316,6 @@ static inline bool kmem_cache_has_cpu_partial(struct kmem_cache *s)
 #define __CMPXCHG_DOUBLE	__SLAB_FLAG_UNUSED
 #endif
 
-/*
- * Tracking user of a slab.
- */
-#define TRACK_ADDRS_COUNT 16
-struct track {
-	unsigned long addr;	/* Called from address */
-#ifdef CONFIG_STACKDEPOT
-	depot_stack_handle_t handle;
-#endif
-	int cpu;		/* Was running on cpu */
-	int pid;		/* Pid context */
-	unsigned long when;	/* When did the operation occur */
-};
-
-enum track_item { TRACK_ALLOC, TRACK_FREE };
-
 #ifdef SLAB_SUPPORTS_SYSFS
 static int sysfs_slab_add(struct kmem_cache *);
 static int sysfs_slab_alias(struct kmem_cache *, const char *);
@@ -528,9 +513,11 @@ __no_kmsan_checks
 static inline void *get_freepointer_safe(struct kmem_cache *s, void *object)
 {
 	unsigned long freepointer_addr;
+	bool use_nofault = false;
 	freeptr_t p;
 
-	if (!debug_pagealloc_enabled_static())
+	trace_android_vh_kernel_nofault(&use_nofault);
+	if (!debug_pagealloc_enabled_static() && !use_nofault)
 		return get_freepointer(s, object);
 
 	object = kasan_reset_tag(object);
@@ -924,8 +911,8 @@ static void print_section(char *level, char *text, u8 *addr,
 	metadata_access_disable();
 }
 
-static struct track *get_track(struct kmem_cache *s, void *object,
-	enum track_item alloc)
+struct track *get_track(struct kmem_cache *s, void *object,
+			enum track_item alloc)
 {
 	struct track *p;
 
@@ -933,6 +920,56 @@ static struct track *get_track(struct kmem_cache *s, void *object,
 
 	return kasan_reset_tag(p + alloc);
 }
+EXPORT_SYMBOL(get_track);
+
+static inline unsigned long node_nr_slabs(struct kmem_cache_node *n);
+
+unsigned long get_each_kmemcache_object(struct kmem_cache *s,
+		int (*fn)(struct kmem_cache *, void *, void *),
+		void *private)
+{
+	int node;
+	unsigned long ret = 0;
+	struct kmem_cache_node *n;
+
+	for_each_kmem_cache_node(s, node, n) {
+		unsigned long flags;
+		struct slab *slab;
+		void *p;
+
+		if (!node_nr_slabs(n))
+			continue;
+
+		spin_lock_irqsave(&n->list_lock, flags);
+		list_for_each_entry(slab, &n->partial, slab_list) {
+			for_each_object(p, s, slab_address(slab), slab->objects) {
+				metadata_access_enable();
+				ret = fn(s, p, private);
+				metadata_access_disable();
+				if (ret) {
+					spin_unlock_irqrestore(&n->list_lock, flags);
+					return ret;
+				}
+			}
+		}
+#ifdef CONFIG_SLUB_DEBUG
+		list_for_each_entry(slab, &n->full, slab_list) {
+			for_each_object(p, s, slab_address(slab), slab->objects) {
+				metadata_access_enable();
+				ret = fn(s, p, private);
+				metadata_access_disable();
+				if (ret) {
+					spin_unlock_irqrestore(&n->list_lock, flags);
+					return ret;
+				}
+			}
+		}
+#endif
+		spin_unlock_irqrestore(&n->list_lock, flags);
+	}
+	return ret;
+}
+EXPORT_SYMBOL_NS_GPL(get_each_kmemcache_object, MINIDUMP);
 
 #ifdef CONFIG_STACKDEPOT
 static noinline depot_stack_handle_t set_track_prepare(gfp_t gfp_flags)
@@ -966,6 +1003,7 @@ static void set_track_update(struct kmem_cache *s, void *object,
 	p->cpu = smp_processor_id();
 	p->pid = current->pid;
 	p->when = jiffies;
+	trace_android_vh_save_track_hash(alloc == TRACK_ALLOC, p);
 }
 
 static __always_inline void set_track(struct kmem_cache *s, void *object,
@@ -2046,7 +2084,8 @@ retry:
 	return 0;
 }
 
-static inline void free_slab_obj_exts(struct slab *slab)
+/* Should be called only if mem_alloc_profiling_enabled() */
+static noinline void free_slab_obj_exts(struct slab *slab)
 {
 	struct slabobj_ext *obj_exts;
 
@@ -2109,40 +2148,45 @@ prepare_slab_obj_exts_hook(struct kmem_cache *s, gfp_t flags, void *p)
 
 	slab = virt_to_slab(p);
 	if (!slab_obj_exts(slab) &&
-	    WARN(alloc_slab_obj_exts(slab, s, flags, false),
-		 "%s, %s: Failed to create slab extension vector!\n",
-		 __func__, s->name))
+	    alloc_slab_obj_exts(slab, s, flags, false)) {
+		pr_warn_once("%s, %s: Failed to create slab extension vector!\n",
+			     __func__, s->name);
 		return NULL;
+	}
 
 	return slab_obj_exts(slab) + obj_to_index(s, slab, p);
+}
+
+/* Should be called only if mem_alloc_profiling_enabled() */
+static noinline void
+__alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags)
+{
+	struct slabobj_ext *obj_exts;
+
+	obj_exts = prepare_slab_obj_exts_hook(s, flags, object);
+	/*
+	 * Currently obj_exts is used only for allocation profiling.
+	 * If other users appear then mem_alloc_profiling_enabled()
+	 * check should be added before alloc_tag_add().
+	 */
+	if (likely(obj_exts))
+		alloc_tag_add(&obj_exts->ref, current->alloc_tag, s->size);
 }
 
 static inline void
 alloc_tagging_slab_alloc_hook(struct kmem_cache *s, void *object, gfp_t flags)
 {
-	if (mem_alloc_profiling_enabled()) {
-		struct slabobj_ext *obj_exts;
-
-		obj_exts = prepare_slab_obj_exts_hook(s, flags, object);
-		/*
-		 * Currently obj_exts is used only for allocation profiling.
-		 * If other users appear then mem_alloc_profiling_enabled()
-		 * check should be added before alloc_tag_add().
-		 */
-		if (likely(obj_exts))
-			alloc_tag_add(&obj_exts->ref, current->alloc_tag, s->size);
-	}
+	if (mem_alloc_profiling_enabled())
+		__alloc_tagging_slab_alloc_hook(s, object, flags);
 }
 
-static inline void
-alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
-			     int objects)
+/* Should be called only if mem_alloc_profiling_enabled() */
+static noinline void
+__alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
+			       int objects)
 {
 	struct slabobj_ext *obj_exts;
 	int i;
-
-	if (!mem_alloc_profiling_enabled())
-		return;
 
 	/* slab->obj_exts might not be NULL if it was created for MEMCG accounting. */
 	if (s->flags & (SLAB_NO_OBJ_EXT | SLAB_NOLEAKTRACE))
@@ -2157,6 +2201,14 @@ alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
 
 		alloc_tag_sub(&obj_exts[off].ref, s->size);
 	}
+}
+
+static inline void
+alloc_tagging_slab_free_hook(struct kmem_cache *s, struct slab *slab, void **p,
+			     int objects)
+{
+	if (mem_alloc_profiling_enabled())
+		__alloc_tagging_slab_free_hook(s, slab, p, objects);
 }
 
 #else /* CONFIG_MEM_ALLOC_PROFILING */
@@ -2473,6 +2525,8 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
 	smp_wmb();
 	if (folio_is_pfmemalloc(folio))
 		slab_set_pfmemalloc(slab);
+
+	trace_android_vh_slab_folio_alloced(order, flags);
 
 	return slab;
 }
@@ -4196,6 +4250,8 @@ out:
 	 */
 	slab_post_alloc_hook(s, lru, gfpflags, 1, &object, init, orig_size);
 
+	trace_android_vh_slab_alloc_node(object, addr, s);
+
 	return object;
 }
 
@@ -4264,9 +4320,14 @@ static void *___kmalloc_large_node(size_t size, gfp_t flags, int node)
 	struct folio *folio;
 	void *ptr = NULL;
 	unsigned int order = get_order(size);
+	bool bypass = false;
 
 	if (unlikely(flags & GFP_SLAB_BUG_MASK))
 		flags = kmalloc_fix_flags(flags);
+
+	trace_android_vh_kmalloc_large_node_bypass(size, flags, node, &ptr, &bypass);
+	if (bypass)
+		return ptr;
 
 	flags |= __GFP_COMP;
 
@@ -4280,6 +4341,8 @@ static void *___kmalloc_large_node(size_t size, gfp_t flags, int node)
 		lruvec_stat_mod_folio(folio, NR_SLAB_UNRECLAIMABLE_B,
 				      PAGE_SIZE << order);
 	}
+
+	trace_android_vh_kmalloc_large_alloced(folio, order, flags);
 
 	ptr = kasan_kmalloc_large(ptr, size, flags);
 	/* As ptr might get tagged, call kmemleak hook after KASAN. */
@@ -4650,6 +4713,8 @@ void slab_free(struct kmem_cache *s, struct slab *slab, void *object,
 
 	if (likely(slab_free_hook(s, object, slab_want_init_on_free(s), false)))
 		do_slab_free(s, slab, object, object, 1, addr);
+
+	trace_android_vh_slab_free(addr, s);
 }
 
 #ifdef CONFIG_MEMCG
@@ -4678,6 +4743,9 @@ void slab_free_bulk(struct kmem_cache *s, struct slab *slab, void *head,
 	 */
 	if (likely(slab_free_freelist_hook(s, &head, &tail, &cnt)))
 		do_slab_free(s, slab, head, tail, cnt, addr);
+
+	trace_android_vh_slab_free(addr, s);
+
 }
 
 #ifdef CONFIG_SLUB_RCU_DEBUG
@@ -4786,6 +4854,7 @@ void kfree(const void *object)
 	struct slab *slab;
 	struct kmem_cache *s;
 	void *x = (void *)object;
+	bool bypass = false;
 
 	trace_kfree(_RET_IP_, object);
 
@@ -4794,6 +4863,9 @@ void kfree(const void *object)
 
 	folio = virt_to_folio(object);
 	if (unlikely(!folio_test_slab(folio))) {
+		trace_android_vh_kfree_bypass(folio, object, &bypass);
+		if (bypass)
+			return;
 		free_large_kmalloc(folio, (void *)object);
 		return;
 	}
@@ -7520,4 +7592,6 @@ void get_slabinfo(struct kmem_cache *s, struct slabinfo *sinfo)
 	sinfo->objects_per_slab = oo_objects(s->oo);
 	sinfo->cache_order = oo_order(s->oo);
 }
+EXPORT_SYMBOL_NS_GPL(get_slabinfo, MINIDUMP);
+
 #endif /* CONFIG_SLUB_DEBUG */

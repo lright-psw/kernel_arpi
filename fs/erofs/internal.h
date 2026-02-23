@@ -51,7 +51,7 @@ struct erofs_device_info {
 	struct erofs_fscache *fscache;
 	struct file *file;
 	struct dax_device *dax_dev;
-	u64 dax_part_off;
+	u64 fsoff, dax_part_off;
 
 	u32 blocks;
 	u32 mapped_blkaddr;
@@ -166,6 +166,7 @@ struct erofs_sb_info {
 	/* sysfs support */
 	struct kobject s_kobj;		/* /sys/fs/erofs/<devname> */
 	struct completion s_kobj_unregister;
+	erofs_off_t dir_ra_bytes;
 
 	/* fscache support */
 	struct fscache_volume *volume;
@@ -213,6 +214,7 @@ enum erofs_kmap_type {
 struct erofs_buf {
 	struct address_space *mapping;
 	struct file *file;
+	u64 off;
 	struct page *page;
 	void *base;
 	enum erofs_kmap_type kmap_type;
@@ -250,6 +252,9 @@ EROFS_FEATURE_FUNCS(xattr_filter, compat, COMPAT_XATTR_FILTER)
 /* bitlock definitions (arranged in reverse order) */
 #define EROFS_I_BL_XATTR_BIT	(BITS_PER_LONG - 1)
 #define EROFS_I_BL_Z_BIT	(BITS_PER_LONG - 2)
+
+/* default readahead size of directories */
+#define EROFS_DIR_RA_BYTES	16384
 
 struct erofs_inode {
 	erofs_nid_t nid;
