@@ -1174,6 +1174,48 @@ pkg_install(
     destdir = "out/rockpi4/dist",
 )
 
+kernel_build(
+    name = "arpi6",
+    srcs = [":kernel_aarch64_sources"],
+    outs = [
+        "Image.gz",
+        "bcm2712-rpi-5-b.dtb",
+        "vc4-kms-v3d-pi5.dtbo",
+    ],
+    arch = "arm64",
+    build_config = "build.config.arpi6",
+    defconfig = "arch/arm64/configs/bcm2712_defconfig",
+    kmi_symbol_list_strict_mode = False,
+    make_goals = [
+        "Image.gz",
+        "broadcom/bcm2712-rpi-5-b.dtb",
+        "overlays/vc4-kms-v3d-pi5.dtbo",
+    ],
+    makefile = ":Makefile",
+    trim_nonlisted_kmi = False,
+    visibility = ["//visibility:private"],
+)
+
+pkg_files(
+    name = "arpi6_dist_files",
+    srcs = [
+        ":arpi6",
+    ],
+    strip_prefix = strip_prefix.files_only(),
+    visibility = ["//visibility:private"],
+)
+
+pkg_install(
+    name = "arpi6_dist",
+    srcs = [":arpi6_dist_files"],
+    destdir = "out/arpi6/dist",
+)
+
+alias(
+    name = "arpi5_dist",
+    actual = ":arpi6_dist",
+)
+
 _AMLOGIC_MODULE_OUTS = [
     # keep sorted
     "drivers/char/hw_random/meson-rng.ko",
