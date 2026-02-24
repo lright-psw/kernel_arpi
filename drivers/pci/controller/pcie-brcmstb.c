@@ -1560,6 +1560,8 @@ static void brcm_config_clkreq(struct brcm_pcie *pcie)
 	u32 clkreq_cntl;
 	int ret, tmp;
 
+	clkreq_cntl = readl(pcie->base + HARD_DEBUG(pcie));
+
 	ret = of_property_read_string(pcie->np, "brcm,clkreq-mode", &mode);
 	if (ret && ret != -EINVAL) {
 		dev_err(pcie->dev, err_msg);
